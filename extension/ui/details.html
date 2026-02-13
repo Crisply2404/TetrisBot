@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TBP 详情（实时）</title>
+    <link rel="stylesheet" href="details.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="left">
+        <div class="h1">详情（实时）</div>
+        <div class="meta" id="meta">加载中…</div>
+        <div class="meta" id="ccInfo"></div>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="panel">
+        <canvas id="board" width="360" height="720"></canvas>
+        <div class="hint" id="hint"></div>
+        <div class="viewBar">
+          <button class="btn" id="backToLive" type="button" hidden>回到实时</button>
+          <div class="meta" id="viewMode"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="h2">推荐步骤（当前块 + Next5）</div>
+        <div class="steps" id="steps"></div>
+        <div class="small">
+          说明：这里的“实时落点”就是当前这一步应该怎么放（以此页为准）；叠加层只是把同一个结果画到棋盘上。点右侧步骤是“预览后续”，只影响这一页展示。
+        </div>
+      </section>
+    </main>
+
+    <script src="../shared/tetris-sim.js"></script>
+    <script src="details.js"></script>
+  </body>
+</html>

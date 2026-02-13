@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TBP 设置</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="hdr">
+        <div class="title">TBP 设置</div>
+        <div class="sub">改完会自动保存；回到游戏就生效。</div>
+      </header>
+
+      <section class="card">
+        <label class="row">
+          <span>启用叠加提示</span>
+          <input id="enabled" type="checkbox" />
+        </label>
+        <label class="row">
+          <span>允许用 Hold</span>
+          <input id="useHold" type="checkbox" />
+        </label>
+        <label class="row">
+          <span>模式预设</span>
+          <select id="modePreset">
+            <option value="40l">40L</option>
+            <option value="vs">对战</option>
+          </select>
+        </label>
+        <label class="row">
+          <span>对战旋转判定</span>
+          <select id="allowedSpins">
+            <option value="tspins">先做 T-Spin（默认）</option>
+            <option value="allspins">All-Spin（以后再加强）</option>
+          </select>
+        </label>
+        <label class="row">
+          <span>叠加层透明度</span>
+          <input id="opacity" type="range" min="0.1" max="0.9" step="0.05" />
+        </label>
+        <label class="row">
+          <span>读取更长块序（更强但更像作弊）</span>
+          <input id="readFullBag" type="checkbox" />
+        </label>
+        <label class="row">
+          <span>调试模式（控制台输出更多信息）</span>
+          <input id="debug" type="checkbox" />
+        </label>
+      </section>
+    </main>
+
+    <script src="../shared/settings.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TBP 缩放采样（缩小系数）</title>
+    <link rel="stylesheet" href="scaleLab.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="left">
+        <div class="h1">缩放采样（缩小系数）</div>
+        <div class="meta" id="meta">加载中…</div>
+        <div class="meta" id="hint"></div>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="panel">
+        <div class="h2">怎么测（按这个顺序来更省事）</div>
+        <ol class="steps">
+          <li>先把窗口恢复到“你觉得正常/常用”的大小，点一次「开始校准」，对齐棋盘后保存。</li>
+          <li>只改<strong>窗口宽</strong>（高度尽量不动）：变窄一点 → 点「开始校准」→ 保存 → 点「记录样本」。重复 5~8 次。</li>
+          <li>只改<strong>窗口高</strong>（宽度尽量不动）：变矮一点 → 同样记录 3~5 次。</li>
+          <li>最后做 2~3 次“极端情况”（很窄/很矮/同时缩放）。</li>
+        </ol>
+        <div class="small">
+          说明：我们会把「窗口大小 + 你校准的棋盘框 + 自动识别的棋盘框」都记下来，之后我就能根据这些数据建模，推算“缩小后应该怎么缩放/偏移我们的悬浮棋盘”。
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="h2">采样控制</div>
+        <div class="actions">
+          <button class="btn" id="startCalib" type="button">开始校准（这次样本）</button>
+          <button class="btn primary" id="record" type="button">记录当前样本</button>
+          <button class="btn" id="copy" type="button">复制样本 JSON</button>
+          <button class="btn danger" id="clear" type="button">清空样本</button>
+        </div>
+        <div class="meta" id="stat"></div>
+        <pre class="box" id="preview"></pre>
+      </section>
+    </main>
+
+    <script src="../shared/settings.js"></script>
+    <script src="scaleLab.js"></script>
+  </body>
+</html>
+

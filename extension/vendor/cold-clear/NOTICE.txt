@@ -1,0 +1,15 @@
+Cold Clear (v1) Web build
+========================
+
+本扩展内置了 Cold Clear（MinusKelvin）的浏览器版产物（WASM + JS + worker）。
+
+来源（获取时间：2026-02-11）：
+- https://minuskelvin.net/cold-clear/ 里的：
+  - cc.js
+  - cc_bg.wasm
+  - worker.js
+
+许可证：
+- Cold Clear 原项目为 MPL-2.0（Mozilla Public License v2.0）。
+- 如果你要把本扩展公开发布（例如 Chrome Web Store），建议把 MPL-2.0 的完整许可文本也一并打包进扩展发布物里。
+

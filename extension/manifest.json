@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "TBP Advisor (TETR.IO)",
+  "version": "0.1.0",
+  "description": "在 TETR.IO 里叠加“当前块最佳摆放建议”，并提供实时详情页查看「当前块 + Next5」推荐步骤。",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "permissions": ["storage", "scripting", "offscreen"],
+  "host_permissions": ["https://tetr.io/*"],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "action": {
+    "default_title": "TBP Advisor",
+    "default_popup": "ui/popup.html"
+  },
+  "options_page": "ui/options.html",
+  "content_scripts": [
+    {
+      "matches": ["https://tetr.io/*"],
+      "js": ["shared/settings.js", "shared/tetris-sim.js", "content/overlay.js", "content/content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page/pageHook.js"],
+      "matches": ["https://tetr.io/*"]
+    }
+  ]
+}
