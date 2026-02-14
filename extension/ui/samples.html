@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TBP 采样点管理</title>
+    <link rel="stylesheet" href="samples.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="hdr">
+        <div class="title">采样点管理</div>
+        <div class="sub" id="status">加载中…</div>
+      </header>
+
+      <section class="card">
+        <div class="h2">导入 / 导出</div>
+        <div class="actions">
+          <button class="btn primary" id="export" type="button">导出 JSON（复制）</button>
+          <button class="btn" id="import" type="button">从下面导入（覆盖）</button>
+          <button class="btn danger" id="clearAll" type="button">清空全部样本</button>
+        </div>
+        <textarea
+          id="json"
+          class="box"
+          rows="8"
+          placeholder='粘贴 JSON：支持 {"scaleSamples":[...]} 或直接粘贴 [...]'
+        ></textarea>
+        <div class="small">提示：禁用的样本不会参与“自动缩放建模”。删除/清空不可恢复（除非你先导出）。</div>
+      </section>
+
+      <section class="card">
+        <div class="h2">样本列表</div>
+        <div class="list" id="list"></div>
+      </section>
+    </main>
+
+    <script src="../shared/settings.js"></script>
+    <script src="samples.js"></script>
+  </body>
+</html>
+

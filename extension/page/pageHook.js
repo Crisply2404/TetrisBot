@@ -77,6 +77,195 @@
     };
   }
 
+  // 自动对齐（优先）：尽量从 PIXI 渲染层里拿到“棋盘真实位置”，窗口怎么缩放都会跟着变。
+  // 参考思路来自 ref/tetrio-plus/microplus.js：通过捕获 window.PIXI 出现时机，并代理 PIXI.Application 构造来拿到 app/stage。
+  let lastPixiApp = null;
+  let lastPixiBounds = null;
+  let lastPixiBoundsMeta = null;
+  let lastPixiBoundsAt = 0;
+  let lastPixiBoundsKey = "";
+  let lastHolderBounds = null;
+  let lastHolderBoundsMeta = null;
+  let lastHolderBoundsAt = 0;
+  let lastHolderBoundsKey = "";
+
+  function setupPixiProbe(pixi) {
+    try {
+      if (!pixi || typeof pixi !== "object") return;
+      if (pixi.__tbpPixiProbeInstalled) return;
+      if (typeof pixi.Application !== "function") return;
+
+      const OriginalApp = pixi.Application;
+      pixi.Application = new Proxy(OriginalApp, {
+        construct(target, args) {
+          const app = new target(...(Array.isArray(args) ? args : []));
+          try {
+            lastPixiApp = app;
+            window.__tbpPixiApp = app;
+            window.__tbpPixiAppAt = Date.now();
+          } catch {}
+          return app;
+        }
+      });
+
+      pixi.__tbpPixiProbeInstalled = true;
+      if (config.debug) console.log("[TBP] PIXI probe installed");
+    } catch {}
+  }
+
+  function installPixiProbe() {
+    if (window.__tbpPixiProbeHooked) return;
+    window.__tbpPixiProbeHooked = true;
+
+    // 已经存在就先装一次
+    try {
+      const pixi0 = safeGetWindowValue("PIXI");
+      if (pixi0) setupPixiProbe(pixi0);
+    } catch {}
+
+    // 捕获“之后才出现的 PIXI”
+    try {
+      const desc = Object.getOwnPropertyDescriptor(window, "PIXI");
+      if (desc && desc.configurable === false) return;
+
+      let pixiRef = safeGetWindowValue("PIXI");
+      Object.defineProperty(window, "PIXI", {
+        configurable: true,
+        get() {
+          return pixiRef;
+        },
+        set(val) {
+          pixiRef = val;
+          setupPixiProbe(val);
+        }
+      });
+    } catch {}
+  }
+
+  function isDisplayObjectCandidate(node) {
+    try {
+      if (!node || typeof node !== "object") return false;
+      if (node.visible === false) return false;
+      if (typeof node.getBounds !== "function") return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function computeBoundsFromPixiStage() {
+    try {
+      const app = safeGetWindowValue("__tbpPixiApp") || lastPixiApp;
+      const stage = app?.stage;
+      const canvas = app?.view || app?.renderer?.view || null;
+      if (!stage || !canvas || typeof canvas.getBoundingClientRect !== "function") return null;
+
+      const rect = canvas.getBoundingClientRect();
+      if (!rect?.width || !rect?.height) return null;
+
+      const now = Date.now();
+      const key = `${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}:${Math.round(
+        canvas.width || 0
+      )}:${Math.round(canvas.height || 0)}`;
+
+      if (key === lastPixiBoundsKey && lastPixiBounds && now - lastPixiBoundsAt < 900) {
+        return { bounds: lastPixiBounds, meta: lastPixiBoundsMeta };
+      }
+
+      const scaleX = canvas.width && rect.width ? canvas.width / rect.width : 1;
+      const scaleY = canvas.height && rect.height ? canvas.height / rect.height : 1;
+      const hiDpi = scaleX > 1.15 || scaleY > 1.15;
+      const dpr = window.devicePixelRatio || 1;
+
+      let best = null;
+      let bestScore = -Infinity;
+      let bestMeta = null;
+
+      const stack = [stage];
+      let visited = 0;
+      const MAX_NODES = 900;
+
+      while (stack.length && visited < MAX_NODES) {
+        const node = stack.pop();
+        visited++;
+        if (!node) continue;
+
+        try {
+          const children = node.children;
+          if (Array.isArray(children) && children.length) {
+            for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+          }
+        } catch {}
+
+        if (!isDisplayObjectCandidate(node)) continue;
+
+        let pixiBounds = null;
+        try {
+          pixiBounds = node.getBounds();
+        } catch {
+          continue;
+        }
+        if (!pixiBounds || !Number.isFinite(pixiBounds.width) || !Number.isFinite(pixiBounds.height)) continue;
+        if (pixiBounds.width <= 0 || pixiBounds.height <= 0) continue;
+
+        // 比例约束：棋盘更像 10x20(0.5) 或 10x40(0.25)
+        const ratio = pixiBounds.width / Math.max(1, pixiBounds.height);
+        if (ratio < 0.18 || ratio > 0.72) continue;
+
+        const scaled = mapPixiBoundsToClient(pixiBounds, canvas, rect, true);
+        const raw = mapPixiBoundsToClient(pixiBounds, canvas, rect, false);
+
+        const scaledScore = scoreBounds(scaled, rect) + (hiDpi ? 0.18 : 0);
+        if (scaledScore > bestScore) {
+          bestScore = scaledScore;
+          best = scaled;
+          bestMeta = {
+            source: "pixi-stage",
+            object: "stage-scan",
+            mode: "scaled",
+            canvasW: Math.round(rect.width),
+            canvasH: Math.round(rect.height),
+            scaleX: Number(scaleX.toFixed(3)),
+            scaleY: Number(scaleY.toFixed(3)),
+            dpr: Number(dpr.toFixed(3)),
+            visited
+          };
+        }
+
+        const rawScore = (scoreBounds(raw, rect) + 0.05) * (hiDpi ? 0.05 : 0.75);
+        if (rawScore > bestScore) {
+          bestScore = rawScore;
+          best = raw;
+          bestMeta = {
+            source: "pixi-stage",
+            object: "stage-scan",
+            mode: "raw",
+            canvasW: Math.round(rect.width),
+            canvasH: Math.round(rect.height),
+            scaleX: Number(scaleX.toFixed(3)),
+            scaleY: Number(scaleY.toFixed(3)),
+            dpr: Number(dpr.toFixed(3)),
+            visited
+          };
+        }
+      }
+
+      if (!best) return null;
+      const meta = bestMeta ? { ...bestMeta, score: Number(bestScore.toFixed(3)) } : null;
+
+      lastPixiBounds = best;
+      lastPixiBoundsMeta = meta;
+      lastPixiBoundsAt = now;
+      lastPixiBoundsKey = key;
+
+      if (config.debug && meta) console.log("[TBP] pixi-stage bounds chosen:", best, meta);
+      return { bounds: best, meta };
+    } catch (e) {
+      if (config.debug) console.warn("[TBP] pixi-stage bounds failed:", e);
+      return null;
+    }
+  }
+
   function findGameApi() {
     const captured = safeGetWindowValue("__tbpGameApi");
     if (isApiCandidate(captured)) return captured;
@@ -192,11 +381,19 @@
 
   function computeStackBounds(holder) {
     try {
-      const objects = [
+      const baseObjects = [
+        // 经验：这些对象更可能代表“棋盘区域”，相对稳定
         ["board", holder?.board],
-        ["holder", holder?.holder],
-        ["stackobj", holder?.stackobj]
+        ["holder", holder?.holder]
       ].filter(([, obj]) => obj && typeof obj.getBounds === "function");
+
+      // ⚠️ stackobj 往往只是“堆叠方块本身”的包围盒，可能会随局面/掉落块变化，导致对齐抖动。
+      // 只有在拿不到更稳定对象时，才把它当兜底候选。
+      const fallbackObjects = baseObjects.length
+        ? []
+        : [["stackobj", holder?.stackobj]].filter(([, obj]) => obj && typeof obj.getBounds === "function");
+
+      const objects = baseObjects.concat(fallbackObjects);
 
       if (!objects.length) return null;
 
@@ -212,6 +409,24 @@
       if (!canvases.length) canvases = listVisibleCanvases();
       if (!canvases.length) return null;
 
+      // 缓存：避免每 120ms 都重算一次导致“跟着方块抖”的观感。
+      // canvas 的屏幕矩形不变时，短时间内直接复用上一次结果更稳。
+      try {
+        const primary = canvases[0];
+        const rect0 = primary?.rect;
+        const canvas0 = primary?.canvas;
+        if (rect0 && canvas0) {
+          const now0 = Date.now();
+          const key0 = `${Math.round(rect0.left)}:${Math.round(rect0.top)}:${Math.round(rect0.width)}:${Math.round(rect0.height)}:${Math.round(
+            canvas0.width || 0
+          )}:${Math.round(canvas0.height || 0)}`;
+          if (key0 === lastHolderBoundsKey && lastHolderBounds && now0 - lastHolderBoundsAt < 900) {
+            return { bounds: lastHolderBounds, meta: lastHolderBoundsMeta };
+          }
+          lastHolderBoundsKey = key0;
+        }
+      } catch {}
+
       let best = null;
       let bestScore = -Infinity;
       let bestMeta = null;
@@ -226,7 +441,8 @@
         if (!pixiBounds || !Number.isFinite(pixiBounds.width) || !Number.isFinite(pixiBounds.height)) continue;
         if (pixiBounds.width <= 0 || pixiBounds.height <= 0) continue;
 
-        const objectBoost = name === "board" ? 0.35 : name === "holder" ? 0.15 : 0;
+        // 更偏好“稳定的棋盘容器”，避免选到“堆叠方块的包围盒”
+        const objectBoost = name === "board" ? 0.65 : name === "holder" ? 0.25 : name === "stackobj" ? -0.8 : 0;
 
         for (const { canvas, rect, preferred } of canvases) {
           const scaleX = canvas.width && rect.width ? canvas.width / rect.width : 1;
@@ -240,6 +456,7 @@
             bestScore = scaledScore;
             best = scaled;
             bestMeta = {
+              source: "holder-data",
               object: name,
               mode: "scaled",
               canvasW: Math.round(rect.width),
@@ -258,6 +475,7 @@
             bestScore = rawScore;
             best = raw;
             bestMeta = {
+              source: "holder-data",
               object: name,
               mode: "raw",
               canvasW: Math.round(rect.width),
@@ -274,6 +492,11 @@
       if (!best) return null;
       const meta = bestMeta ? { ...bestMeta, score: Number(bestScore.toFixed(3)) } : null;
       if (config.debug && meta) console.log("[TBP] bounds chosen:", best, meta);
+      try {
+        lastHolderBounds = best;
+        lastHolderBoundsMeta = meta;
+        lastHolderBoundsAt = Date.now();
+      } catch {}
       return { bounds: best, meta };
     } catch (e) {
       if (config.debug) console.warn("[TBP] bounds failed:", e);
@@ -386,6 +609,30 @@
     const game = raw?.game;
     if (!game) return null;
 
+    // 对战上下文（尽量提取；提取不到就留空，后端会用默认值兜底）
+    // 说明：不同模式/版本字段名可能不一致，所以这里做“多候选字段尝试”。
+    const comboRaw =
+      game.combo ??
+      game.stats?.combo ??
+      game.stats?.combo_current ??
+      game.stats?.currentcombo ??
+      game.stats?.comboCounter ??
+      game.state?.combo ??
+      null;
+    const combo = Number.isFinite(Number(comboRaw)) ? Math.max(0, Math.floor(Number(comboRaw))) : null;
+
+    const b2bRaw =
+      game.back_to_back ??
+      game.backToBack ??
+      game.b2b ??
+      game.stats?.b2b ??
+      game.stats?.back_to_back ??
+      game.stats?.backToBack ??
+      game.stats?.btb ??
+      game.state?.b2b ??
+      null;
+    const backToBack = typeof b2bRaw === "boolean" ? b2bRaw : Number.isFinite(Number(b2bRaw)) ? Number(b2bRaw) > 0 : null;
+
     const falling = game.falling || null;
     const current = normalizePiece(falling?.type);
 
@@ -427,6 +674,8 @@
       next,
       bufferRows: buffer,
       visibleRows: visible,
+      combo,
+      backToBack,
       frame: Number(raw?.frame || 0)
     };
   }
@@ -453,7 +702,7 @@
     try {
       const raw = api.ejectState();
       const holder = api.getHolderData?.();
-      const boundsResult = computeStackBounds(holder);
+      const boundsResult = computeStackBounds(holder) || computeBoundsFromPixiStage();
       const bounds = boundsResult?.bounds || null;
       const boundsMeta = boundsResult?.meta || null;
       const state = extractStateFromEject(raw);
@@ -493,5 +742,6 @@
   });
 
   installMapTap();
+  installPixiProbe();
   setInterval(tick, 120);
 })();

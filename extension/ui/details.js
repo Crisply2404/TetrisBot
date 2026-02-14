@@ -52,8 +52,40 @@ function drawBoard(canvas, board01, bufferRows, visibleRows, highlightCells) {
   if (!ctx) return;
 
   const w = 10;
+  const buf = Number.isFinite(Number(bufferRows)) ? Number(bufferRows) : 0;
+  const vis = Number.isFinite(Number(visibleRows)) ? Number(visibleRows) : 20;
+
+  // 详情页默认只显示“可见 20 行”，不要把 bufferRows 也画出来（否则太高）。
+  // 只有当高亮格子确实超出“可见上边界”时，才按需在顶部多加行数：
+  // - 比棋盘多 1 行，就加 1 行
+  // - 多 N 行，就加 N 行
+  let extraTop = 0;
+  try {
+    if (Array.isArray(highlightCells) && highlightCells.length) {
+      let minVy = 0;
+      for (const c of highlightCells) {
+        const y = Number(c?.y);
+        if (!Number.isFinite(y)) continue;
+        const vy = y - buf;
+        if (vy < minVy) minVy = vy;
+      }
+      if (minVy < 0) extraTop = Math.ceil(-minVy);
+    }
+  } catch {}
+
+  const totalRows = Math.max(1, extraTop + Math.max(1, vis));
+
+  // 让详情页也能显示“上边界之外”（buffer 行）：把 canvas 高度按总行数扩出来
+  // 并同步更新 CSS 高度，避免缩放导致发糊。
+  try {
+    const cell = canvas.width / w;
+    const desiredH = Math.max(1, Math.round(cell * totalRows));
+    if (canvas.height !== desiredH) canvas.height = desiredH;
+    canvas.style.height = `${desiredH}px`;
+  } catch {}
+
   const cw = canvas.width / w;
-  const ch = canvas.height / visibleRows;
+  const ch = canvas.height / totalRows;
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = "#0b0c0f";
@@ -61,16 +93,33 @@ function drawBoard(canvas, board01, bufferRows, visibleRows, highlightCells) {
 
   if (!board01) return;
 
-  for (let y = 0; y < bufferRows + visibleRows; y++) {
+  // canvas 的 y=0 对应 board01 的哪一行？
+  // - 不加 extraTop 时：对应“可见区顶边”（board y = buf）
+  // - 加 extraTop 时：对应“可见区顶边往上 extraTop 行”（board y = buf - extraTop）
+  const baseY = buf - extraTop;
+
+  for (let y = 0; y < totalRows; y++) {
     for (let x = 0; x < w; x++) {
-      const filled = board01[y]?.[x] ? 1 : 0;
-      const vy = y - bufferRows;
-      if (vy < 0 || vy >= visibleRows) continue;
+      const yy = baseY + y;
+      const filled = board01[yy]?.[x] ? 1 : 0;
       if (filled) {
         ctx.fillStyle = "#2a2f39";
-        ctx.fillRect(x * cw, vy * ch, cw - 1, ch - 1);
+        ctx.fillRect(x * cw, y * ch, cw - 1, ch - 1);
       }
     }
+  }
+
+  // 画一条“可见上边界分界线”（只有在真的显示了 extraTop 时才画）
+  if (extraTop > 0) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.26)";
+    ctx.lineWidth = Math.max(1, Math.min(cw, ch) * 0.12);
+    const py = extraTop * ch + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, py);
+    ctx.lineTo(canvas.width, py);
+    ctx.stroke();
+    ctx.restore();
   }
 
   if (Array.isArray(highlightCells)) {
@@ -78,10 +127,12 @@ function drawBoard(canvas, board01, bufferRows, visibleRows, highlightCells) {
     ctx.strokeStyle = "rgba(0, 255, 170, 0.95)";
     ctx.lineWidth = Math.max(1, Math.min(cw, ch) * 0.08);
     for (const cell of highlightCells) {
-      const vy = cell.y - bufferRows;
-      if (vy < 0 || vy >= visibleRows) continue;
+      if (!Number.isFinite(cell?.x) || !Number.isFinite(cell?.y)) continue;
+      if (cell.x < 0 || cell.x >= w) continue;
+      const yy = cell.y - baseY;
+      if (yy < 0 || yy >= totalRows) continue;
       const px = cell.x * cw;
-      const py = vy * ch;
+      const py = yy * ch;
       ctx.fillRect(px + 1, py + 1, cw - 2, ch - 2);
       ctx.strokeRect(px + 1, py + 1, cw - 2, ch - 2);
     }
@@ -178,14 +229,15 @@ function setActiveStep(index) {
   }
 }
 
-function applyDetailsData(state, live, planned, key, respError) {
+function applyDetailsData(state, live, planned, key, respError, alignSource) {
   currentState = state || null;
   liveSuggestion = live || null;
   planSuggestion = planned || null;
   const nextStr = Array.isArray(state?.next) ? state.next.slice(0, 5).join("") : "-";
   const frameStr = Number.isFinite(state?.frame) ? String(state.frame) : "-";
   const canHold = state?.canHold === false ? "否" : "是";
-  const meta = `已连接；帧=${frameStr}；当前=${state?.current || "-"} Hold=${state?.hold || "-"}（可Hold=${canHold}） Next=${nextStr}${
+  const align = alignSource ? `；对齐=${alignSource}` : "";
+  const meta = `已连接；帧=${frameStr}；当前=${state?.current || "-"} Hold=${state?.hold || "-"}（可Hold=${canHold}） Next=${nextStr}${align}${
     respError ? `（提示：${respError}）` : ""
   }`;
   setText("meta", meta);
@@ -282,7 +334,7 @@ async function refresh() {
 
     if (key && key !== currentKey) {
       selectedStepIndex = 0;
-      applyDetailsData(state, live, planned, key, resp.error || null);
+      applyDetailsData(state, live, planned, key, resp.error || null, resp.alignSource || null);
       return;
     }
 

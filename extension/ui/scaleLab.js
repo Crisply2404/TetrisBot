@@ -70,7 +70,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   setText("meta", `目标页面：tabId=${tabId}`);
-  setText("hint", "建议：每次改完窗口大小后，都先点「开始校准」，保存后再点「记录当前样本」。");
+  setText(
+    "hint",
+    "建议：每次改完窗口大小后，都先点「开始校准」，再点校准工具栏里的「保存校准」（不入样本），回到本页再点「记录当前样本」。如果你点了「保存为样本」，本页的“记录”可以跳过。"
+  );
 
   async function refreshStat() {
     const samples = await getSamples();
@@ -87,7 +90,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       setText("hint", `无法开启校准：${resp?.error || "未知错误"}\n提示：先确保你已经进入一局游戏，并且弹窗里启用了叠加提示。`);
       return;
     }
-    setText("hint", "已开启校准：请回到游戏页面拖动绿色框对齐棋盘，然后点“保存校准”。保存后再回来点「记录当前样本」。");
+    setText(
+      "hint",
+      "已开启校准：请回到游戏页面拖动绿色框对齐棋盘。建议点“保存校准”（不入样本），然后再回来点「记录当前样本」。如果你点了“保存为样本”，本页可以直接跳到下一次缩放测试。"
+    );
   });
 
   document.getElementById("record")?.addEventListener("click", async () => {
@@ -140,4 +146,3 @@ document.addEventListener("DOMContentLoaded", async () => {
     await refreshStat();
   });
 });
-

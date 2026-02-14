@@ -25,16 +25,27 @@
   let lastColdClearDebug = null;
   let lastLockedViewport = null;
   let holdUsedThisTurn = false;
+  let calibrationActive = false;
 
   // 一致性缓存：同一个局面（board/current/hold/next + 设置）算过一次就复用。
-  // 这样你 undo 回到同一局面时，不会出现“cc 又换了一种建议”的感觉。
-  const liveSemanticCache = new Map(); // semanticKey -> { at, suggestion, engine, coldClearError, coldClearDebug }
+  // 你要求“readFullBag 开/关是两套记忆系统”，所以这里拆成两套缓存（互不影响、互不抢容量）。
+  const liveSemanticCacheShort = new Map(); // readFullBag=false
+  const liveSemanticCacheLong = new Map(); // readFullBag=true
   const LIVE_CACHE_MAX = 50;
 
-  // cold-clear 增量同步用：记录上一手“冷清算出来的落点”与对应的局面
-  let lastCcState = null;
-  let lastCcMove = null;
-  let lastCcCells = null;
+  function getLiveSemanticCache(s) {
+    return s?.readFullBag ? liveSemanticCacheLong : liveSemanticCacheShort;
+  }
+
+  // cold-clear 增量同步用：同样按 readFullBag 拆两套（避免 toggle 后串状态）
+  const ccMem = {
+    short: { state: null, move: null, cells: null },
+    long: { state: null, move: null, cells: null }
+  };
+
+  function getCcMem(s) {
+    return s?.readFullBag ? ccMem.long : ccMem.short;
+  }
 
   // Zen 撤回/重开（时间倒退）用：先按“立即 reset”处理（你要求暂时不要防抖）。
   // 后续如果你又想要防抖/限流，我们再加回来。
@@ -257,6 +268,28 @@
 
   function isRectLike(r) {
     return !!r && typeof r === "object" && [r.x, r.y, r.width, r.height].every(Number.isFinite);
+  }
+
+  function computeAlignInfo(state, settings, overlay, calibrationActive) {
+    const isCalibrating = !!(
+      calibrationActive &&
+      typeof overlay?.isCalibrating === "function" &&
+      (() => {
+        try {
+          return overlay.isCalibrating();
+        } catch {
+          return false;
+        }
+      })()
+    );
+
+    if (isCalibrating) return { mode: "calib", label: "校准中" };
+
+    const hasLocked = !!(settings?.boundsLock && isRectLike(settings?.boundsLockedRect));
+    if (hasLocked) return { mode: "calib", label: "校准/采样" };
+
+    if (state?.bounds) return { mode: "pixi", label: "自动(PIXI)" };
+    return { mode: "unknown", label: "未知" };
   }
 
   function isSameBoard(a, b) {
@@ -516,6 +549,7 @@
     const collisions = [];
     const outOfBounds = [];
     const nonInteger = [];
+    const aboveTop = [];
     for (const c of Array.isArray(cellsTop) ? cellsTop : []) {
       const x = c?.x;
       const y = c?.y;
@@ -527,8 +561,13 @@
         nonInteger.push({ x, y });
         continue;
       }
-      if (x < 0 || x >= width || y < 0 || y >= height) {
+      if (x < 0 || x >= width || y >= height) {
         outOfBounds.push({ x, y });
+        continue;
+      }
+      // 允许“上边界之外”：y < 0 视为空（不算越界/不算碰撞）
+      if (y < 0) {
+        aboveTop.push({ x, y });
         continue;
       }
       if (board01Top?.[y]?.[x]) {
@@ -540,6 +579,7 @@
       collisions,
       outOfBounds,
       nonInteger,
+      aboveTop,
       height
     };
   }
@@ -586,7 +626,8 @@
 
     // 先查一致性缓存：命中则直接复用，不再问 cold-clear
     try {
-      const cached = semanticKey ? liveSemanticCache.get(semanticKey) : null;
+      const cache = semanticKey ? getLiveSemanticCache(settings) : null;
+      const cached = semanticKey && cache ? cache.get(semanticKey) : null;
       if (cached?.suggestion?.cells?.length) {
         lastEngineName = cached.engine || "cold-clear-v1";
         lastColdClearError = cached.coldClearError || null;
@@ -605,11 +646,12 @@
       // 优化：如果上一手玩家确实按我们建议下了，就走 play/new_piece 推进状态，避免每次都重启 cold-clear（会很慢，甚至超时）。
       let sync = { type: "start" };
       try {
-        if (lastCcMove && lastCcCells && lastCcState) {
-          const prev = lastCcState;
+        const mem = getCcMem(settings);
+        if (mem?.move && mem?.cells && mem?.state) {
+          const prev = mem.state;
           const prevBoard = normalizeBoard(prev?.board);
           const nowBoard = normalizeBoard(state?.board);
-          const predicted = prevBoard ? applyCellsToBoard(prevBoard, lastCcCells) : null;
+          const predicted = prevBoard ? applyCellsToBoard(prevBoard, mem.cells) : null;
 
           const prevCurrent = sim?.normalizePieceId?.(prev?.current) || null;
           const prevHold = sim?.normalizePieceId?.(prev?.hold) || null;
@@ -618,7 +660,7 @@
           const nowCurrent = sim?.normalizePieceId?.(state?.current) || null;
           const nowHold = sim?.normalizePieceId?.(state?.hold) || null;
 
-          const placed = sim?.normalizePieceId?.(lastCcMove?.piece) || null;
+          const placed = sim?.normalizePieceId?.(mem.move?.piece) || null;
           const usedHold = !!placed && !!prevCurrent && placed !== prevCurrent;
 
           let expectedCurrent = prevNext[0] || null;
@@ -629,12 +671,12 @@
           const curOk = !expectedCurrent || nowCurrent === expectedCurrent;
           const holdOk = !expectedHold || nowHold === expectedHold;
 
-           if (boardOk && curOk && holdOk) {
+          if (boardOk && curOk && holdOk) {
             // 关键：TBP 的 play/new_piece 需要知道“这一手消耗了队列里几个 piece”
             // - 普通情况：落 1 个块，只消耗 1 个
             // - 用了 hold 且上一手 hold 为空：会额外消耗 1 个（hold 会先把 next 顶上来）
             const advanceBy = usedHold && !prevHold ? 2 : 1;
-            sync = { type: "advance", move: lastCcMove, advanceBy };
+            sync = { type: "advance", move: mem.move, advanceBy };
           }
         }
       } catch {}
@@ -687,14 +729,18 @@
           };
 
           // 不要把“错误落点”写入一致性缓存；并强制 reset，让下一次从 start 重新同步。
-          lastCcState = null;
-          lastCcMove = null;
-          lastCcCells = null;
+          try {
+            const mem = getCcMem(settings);
+            mem.state = null;
+            mem.move = null;
+            mem.cells = null;
+          } catch {}
           lastSuggestion = null;
           lastEngineDebug = settings?.debug ? { engine: lastEngineName, ...lastColdClearDebug, sync } : { sync };
           lastLiveKey = semanticKey || "";
           try {
-            if (semanticKey) liveSemanticCache.delete(semanticKey);
+            const cache = getLiveSemanticCache(settings);
+            if (semanticKey && cache) cache.delete(semanticKey);
           } catch {}
           await requestColdClearReset(`invalid_move:${why}`);
           draw();
@@ -744,37 +790,42 @@
             if (post) {
               const postKey = semanticKeyForLive(post, settings);
               if (postKey) {
-                liveSemanticCache.set(postKey, {
+                const cache = getLiveSemanticCache(settings);
+                if (cache) cache.set(postKey, {
                   at: Date.now(),
                   suggestion: { ...lastSuggestion, useHold: false },
                   engine: lastEngineName,
                   coldClearError: null,
                   coldClearDebug: lastColdClearDebug ? { ...lastColdClearDebug, holdCarry: true } : { holdCarry: true }
                 });
-                trimLiveCacheIfNeeded();
+                trimLiveCacheIfNeeded(cache);
               }
             }
           }
         } catch {}
 
         // 记录“这一步的建议”，方便下一次状态变化时判断能否用 play/new_piece 增量推进
-        lastCcState = state;
-        lastCcMove = resp.move;
-        lastCcCells = cells;
+        try {
+          const mem = getCcMem(settings);
+          mem.state = state;
+          mem.move = resp.move;
+          mem.cells = cells;
+        } catch {}
 
         lastEngineDebug = settings?.debug ? { engine: lastEngineName, ...resp.debug, sync } : { preset: settings?.modePreset || "40l", reason: null, sync };
 
         // 写入一致性缓存（语义 key）
         try {
           if (semanticKey) {
-            liveSemanticCache.set(semanticKey, {
+            const cache = getLiveSemanticCache(settings);
+            if (cache) cache.set(semanticKey, {
               at: Date.now(),
               suggestion: lastSuggestion,
               engine: lastEngineName,
               coldClearError: null,
               coldClearDebug: lastColdClearDebug
             });
-            trimLiveCacheIfNeeded();
+            trimLiveCacheIfNeeded(cache);
           }
         } catch {}
 
@@ -788,9 +839,12 @@
       lastEngineName = resp?.engine || "cold-clear-v1";
       lastColdClearError = resp?.error ? String(resp.error) : "cold-clear 没有响应/不支持";
       lastColdClearDebug = resp?.debug || null;
-      lastCcState = null;
-      lastCcMove = null;
-      lastCcCells = null;
+      try {
+        const mem = getCcMem(settings);
+        mem.state = null;
+        mem.move = null;
+        mem.cells = null;
+      } catch {}
       lastSuggestion = null;
       lastEngineDebug = settings?.debug ? { coldClearError: lastColdClearError, coldClearDebug: lastColdClearDebug, sync } : { sync };
       lastLiveKey = semanticKey || "";
@@ -893,9 +947,10 @@
     if (!state) return "";
     const next = Array.isArray(state?.next) ? state.next.join("") : "";
     const canHold = state?.canHold === false ? "CH0" : "CH1";
+    const engineMode = String(settings?.engineMode || "cc2");
     return `${state.boardHash || ""}:${state.current || ""}:${state.hold || "-"}:${next}:${canHold}:${settings?.modePreset || "40l"}:${
       settings?.useHold ? "H1" : "H0"
-    }:${settings?.readFullBag ? "B1" : "B0"}:${String(settings?.allowedSpins || "tspins")}`;
+    }:${settings?.readFullBag ? "B1" : "B0"}:${engineMode}:${String(settings?.allowedSpins || "tspins")}:${String(settings?.pickStrategy || "strict")}`;
   }
 
   function stateKeyForLive(state, settings) {
@@ -904,14 +959,16 @@
     return `${frame}:${semanticKeyForLive(state, settings)}`;
   }
 
-  function trimLiveCacheIfNeeded() {
+  function trimLiveCacheIfNeeded(cache) {
     try {
-      if (liveSemanticCache.size <= LIVE_CACHE_MAX) return;
-      const arr = Array.from(liveSemanticCache.entries());
+      const m = cache;
+      if (!m || typeof m.size !== "number") return;
+      if (m.size <= LIVE_CACHE_MAX) return;
+      const arr = Array.from(m.entries());
       arr.sort((a, b) => (a?.[1]?.at || 0) - (b?.[1]?.at || 0));
-      while (liveSemanticCache.size > LIVE_CACHE_MAX && arr.length) {
+      while (m.size > LIVE_CACHE_MAX && arr.length) {
         const k = arr.shift()?.[0];
-        if (k) liveSemanticCache.delete(k);
+        if (k) m.delete(k);
       }
     } catch {}
   }
@@ -946,7 +1003,7 @@
       overlay.clear();
       return;
     }
-    if (!pageConnected || !lastState?.bounds) {
+    if (!pageConnected || !lastState) {
       lastOverlayBounds = null;
       lastOverlayBoundsMode = null;
       lastBaseBounds = null;
@@ -959,6 +1016,20 @@
     const liveSemanticNow = semanticKeyForLive(lastState, settings);
     const suggestionOk = !!liveSemanticNow && liveSemanticNow === lastLiveKey;
     const suggestionForDraw = suggestionOk ? lastSuggestion : null;
+
+    // 校准模式：用户正在拖框对齐棋盘时，不要用自动定位覆盖用户的框。
+    // 只需要用“当前框”重画同一份建议，方便实时预览。
+    try {
+      if (calibrationActive && typeof overlay?.isCalibrating === "function" && overlay.isCalibrating()) {
+        overlay.drawSuggestion(suggestionForDraw, settings, {
+          visibleRows: lastState.visibleRows,
+          bufferRows: lastState.bufferRows,
+          boundsMode: "calibrating",
+          boundsMeta: lastState.boundsMeta || null
+        });
+        return;
+      }
+    } catch {}
 
     // 校准并锁定后：优先使用“绝对像素框”，避免 base bounds 在不同帧变动导致忽大忽小。
     const locked = settings?.boundsLock && isRectLike(settings?.boundsLockedRect) ? settings.boundsLockedRect : null;
@@ -1026,7 +1097,10 @@
 
     const { bounds: baseBounds, mode } = computeOverlayBoundsFromState(lastState);
     lastBaseBounds = baseBounds;
-    const bounds = applyBoundsAdjust(baseBounds, settings?.boundsAdjust);
+
+    // 自动对齐（优先）：没有锁定校准时，直接用自动识别到的 baseBounds。
+    // 校准/采样只作为兜底（用户明确点“保存校准”才会锁定覆盖自动对齐）。
+    const bounds = baseBounds;
     lastOverlayBounds = bounds;
     lastOverlayBoundsMode = mode;
 
@@ -1072,15 +1146,21 @@
       lastBaseBounds = null;
       lastColdClearError = null;
       lastColdClearDebug = null;
-      lastCcState = null;
-      lastCcMove = null;
-      lastCcCells = null;
+      try {
+        ccMem.short.state = null;
+        ccMem.short.move = null;
+        ccMem.short.cells = null;
+        ccMem.long.state = null;
+        ccMem.long.move = null;
+        ccMem.long.cells = null;
+      } catch {}
       lastLiveKey = "";
       liveInFlight = null;
       lastAppliedLiveRequestId = 0;
       holdUsedThisTurn = false;
       try {
-        liveSemanticCache.clear();
+        liveSemanticCacheShort.clear();
+        liveSemanticCacheLong.clear();
       } catch {}
       draw();
       return;
@@ -1092,14 +1172,20 @@
       const nextFrame = Number.isFinite(nextState?.frame) ? Number(nextState.frame) : null;
       if (prevFrame !== null && nextFrame !== null && nextFrame < prevFrame) {
         requestColdClearReset(`rewind:${prevFrame}->${nextFrame}`);
-        lastCcState = null;
-        lastCcMove = null;
-        lastCcCells = null;
+        try {
+          ccMem.short.state = null;
+          ccMem.short.move = null;
+          ccMem.short.cells = null;
+          ccMem.long.state = null;
+          ccMem.long.move = null;
+          ccMem.long.cells = null;
+        } catch {}
         lastLiveKey = "";
         liveInFlight = null;
         holdUsedThisTurn = false;
         try {
-          liveSemanticCache.clear();
+          liveSemanticCacheShort.clear();
+          liveSemanticCacheLong.clear();
         } catch {}
       }
     } catch {}
@@ -1186,12 +1272,14 @@
         const suggestionCells = Array.isArray(liveSuggestion?.cells) ? liveSuggestion.cells.length : 0;
         const boardH = Array.isArray(lastState?.board) ? lastState.board.length : null;
         const boardW = Array.isArray(lastState?.board?.[0]) ? lastState.board[0].length : null;
+        const hasLocked = !!(settings?.boundsLock && isRectLike(settings?.boundsLockedRect));
+        const align = computeAlignInfo(lastState, settings, overlay, calibrationActive);
         sendResponse({
           ok: true,
           connected: pageConnected,
           error: lastPageError,
           hasState: !!lastState,
-          hasBounds: !!lastState?.bounds,
+          hasBounds: !!lastState?.bounds || hasLocked,
           hasSuggestion: suggestionCells > 0,
           suggestionCells,
           engine: lastEngineName || "sim",
@@ -1211,6 +1299,8 @@
           boundsRaw: lastState?.bounds || null,
           boundsUsed: lastOverlayBounds || null,
           boundsMode: lastOverlayBoundsMode || null,
+          alignMode: align.mode,
+          alignSource: align.label,
           baseBounds: lastBaseBounds || null,
           viewport: { w: window.innerWidth, h: window.innerHeight },
           dpr: window.devicePixelRatio || 1,
@@ -1228,67 +1318,107 @@
 
           const startRect = locked0 || lastOverlayBounds || applyBoundsAdjust(lastBaseBounds, settings?.boundsAdjust) || lastBaseBounds;
 
-          const ok = overlay.startCalibration(startRect, {
-            onSave: (rect) => {
-              try {
-                const base = lastBaseBounds;
-                if (!rect) return;
+          // 进入校准前，先用当前框画一次建议，方便你拖动时“所见即所得”。
+          try {
+            overlay.setBounds(startRect);
+            const liveSemanticNow = semanticKeyForLive(lastState, settings);
+            const suggestionOk = !!liveSemanticNow && liveSemanticNow === lastLiveKey;
+            const suggestionForDraw = suggestionOk ? lastSuggestion : null;
+            overlay.drawSuggestion(suggestionForDraw, settings, {
+              visibleRows: lastState?.visibleRows ?? 20,
+              bufferRows: lastState?.bufferRows ?? 0,
+              boundsMode: "calibrating",
+              boundsMeta: lastState?.boundsMeta || null
+            });
+          } catch {}
 
-                const patch = {
-                  boundsLock: true,
+          const saveCalibration = (rect, alsoSaveAsSample) => {
+            try {
+              const base = lastBaseBounds;
+              if (!rect) return;
+
+              const viewportNow = { w: window.innerWidth, h: window.innerHeight };
+              const patch = {
+                boundsLock: true,
+                boundsLockedRect: rect,
+                boundsLockedViewport: viewportNow,
+                // 记住“校准时 base bounds 的模式”，后续不要乱切
+                boundsLockBaseMode: lastOverlayBoundsMode === "croppedFromTotal" ? "croppedFromTotal" : "visible"
+              };
+
+              // base 可用时同时更新相对比例（方便以后做“解锁/自适应”再用）
+              if (base && isRectLike(base)) {
+                const dxr = (rect.x - base.x) / Math.max(1, base.width);
+                const dyr = (rect.y - base.y) / Math.max(1, base.height);
+                const wr = rect.width / Math.max(1, base.width);
+                const hr = rect.height / Math.max(1, base.height);
+                patch.boundsAdjust = {
+                  dxr: Number.isFinite(dxr) ? dxr : 0,
+                  dyr: Number.isFinite(dyr) ? dyr : 0,
+                  wr: Number.isFinite(wr) ? wr : 1,
+                  hr: Number.isFinite(hr) ? hr : 1
+                };
+              }
+
+              // “保存为样本”才会写入 scaleSamples（保存校准不再默认污染样本）
+              if (alsoSaveAsSample) {
+                const sample = {
+                  ts: Date.now(),
+                  viewport: viewportNow,
+                  dpr: window.devicePixelRatio || 1,
+                  baseBounds: base && isRectLike(base) ? base : null,
+                  boundsAdjust: patch.boundsAdjust || null,
                   boundsLockedRect: rect,
-                  boundsLockedViewport: { w: window.innerWidth, h: window.innerHeight },
-                  // 记住“校准时 base bounds 的模式”，后续不要乱切
-                  boundsLockBaseMode: lastOverlayBoundsMode === "croppedFromTotal" ? "croppedFromTotal" : "visible"
+                  boundsLockBaseMode: patch.boundsLockBaseMode || null,
+                  boundsMeta: lastState?.boundsMeta || null,
+                  boundsMode: "lockedRect",
+                  boundsRaw: lastState?.bounds || null,
+                  boundsUsed: rect
                 };
 
-                // base 可用时同时更新相对比例（方便以后做“解锁/自适应”再用）
-                if (base && isRectLike(base)) {
-                  const dxr = (rect.x - base.x) / Math.max(1, base.width);
-                  const dyr = (rect.y - base.y) / Math.max(1, base.height);
-                  const wr = rect.width / Math.max(1, base.width);
-                  const hr = rect.height / Math.max(1, base.height);
-                  patch.boundsAdjust = {
-                    dxr: Number.isFinite(dxr) ? dxr : 0,
-                    dyr: Number.isFinite(dyr) ? dyr : 0,
-                    wr: Number.isFinite(wr) ? wr : 1,
-                    hr: Number.isFinite(hr) ? hr : 1
-                  };
-                }
+                const list = Array.isArray(settings?.scaleSamples) ? settings.scaleSamples.slice() : [];
+                const mode = String(sample.boundsLockBaseMode || "");
+                const idx = list.findIndex(
+                  (s) =>
+                    Number(s?.viewport?.w) === viewportNow.w &&
+                    Number(s?.viewport?.h) === viewportNow.h &&
+                    String(s?.boundsLockBaseMode || "") === mode
+                );
+                if (idx >= 0) list[idx] = sample;
+                else list.push(sample);
 
-                // 自适应建模：把“这次校准的窗口大小”一起记录成样本。
-                // 以后你只要在某个窗口大小校准过一次，缩放到类似大小时我们就会优先套用那条样本。
-                try {
-                  const viewport = { w: window.innerWidth, h: window.innerHeight };
-                  const sample = {
-                    ts: Date.now(),
-                    viewport,
-                    dpr: window.devicePixelRatio || 1,
-                    baseBounds: base && isRectLike(base) ? base : null,
-                    boundsAdjust: patch.boundsAdjust || null,
-                    boundsLockedRect: rect,
-                    boundsLockBaseMode: patch.boundsLockBaseMode || null,
-                    boundsMeta: lastState?.boundsMeta || null,
-                    boundsMode: "lockedRect",
-                    boundsRaw: lastState?.bounds || null,
-                    boundsUsed: rect
-                  };
+                window.tbpSettings.setSettings({ ...patch, scaleSamples: list });
+              } else {
+                window.tbpSettings.setSettings(patch);
+              }
 
-                  const list = Array.isArray(settings?.scaleSamples) ? settings.scaleSamples.slice() : [];
-                  const mode = String(sample.boundsLockBaseMode || "");
-                  const idx = list.findIndex(
-                    (s) =>
-                      Number(s?.viewport?.w) === viewport.w &&
-                      Number(s?.viewport?.h) === viewport.h &&
-                      String(s?.boundsLockBaseMode || "") === mode
-                  );
-                  if (idx >= 0) list[idx] = sample;
-                  else list.push(sample);
+              lastLockedViewport = { ...viewportNow };
+              calibrationActive = false;
+              computeLive();
+              draw();
+            } catch {}
+          };
 
-                  window.tbpSettings.setSettings({ ...patch, scaleSamples: list });
-                } catch {
-                  window.tbpSettings.setSettings(patch);
-                }
+          const ok = overlay.startCalibration(startRect, {
+            onSave: (rect) => saveCalibration(rect, false),
+            onSaveSample: (rect) => saveCalibration(rect, true),
+            onCancel: () => {
+              calibrationActive = false;
+              draw();
+            },
+            onUpdate: (rect) => {
+              try {
+                if (!rect) return;
+                overlay.setBounds(rect);
+                const liveSemanticNow = semanticKeyForLive(lastState, settings);
+                const suggestionOk = !!liveSemanticNow && liveSemanticNow === lastLiveKey;
+                const suggestionForDraw = suggestionOk ? lastSuggestion : null;
+                overlay.drawSuggestion(suggestionForDraw, settings, {
+                  visibleRows: lastState?.visibleRows ?? 20,
+                  bufferRows: lastState?.bufferRows ?? 0,
+                  boundsMode: "calibrating",
+                  boundsMeta: lastState?.boundsMeta || null
+                });
               } catch {}
             },
             onSnap: (rect) => {
@@ -1341,6 +1471,7 @@
             }
           });
 
+          if (ok) calibrationActive = true;
           return ok ? { ok: true } : { ok: false, error: "无法进入校准模式（可能还没拿到棋盘 bounds）。" };
         })()
           .then((resp) => sendResponse(resp))
@@ -1356,6 +1487,8 @@
           const semNow = semanticKeyForLive(lastState, settings);
           const liveOk = !!semNow && semNow === lastLiveKey;
           const detailsSuggestion = await getOrComputeDetailsSuggestion(lastState);
+          const hasLocked = !!(settings?.boundsLock && isRectLike(settings?.boundsLockedRect));
+          const align = computeAlignInfo(lastState, settings, overlay, calibrationActive);
           sendResponse({
             ok: true,
             connected: pageConnected,
@@ -1367,7 +1500,9 @@
             engine: lastEngineName || "sim",
             coldClearError: liveOk ? lastColdClearError || null : null,
             coldClearDebug: liveOk ? lastColdClearDebug || null : null,
-            modePreset: settings?.modePreset || "40l"
+            modePreset: settings?.modePreset || "40l",
+            alignMode: align.mode,
+            alignSource: align.label
           });
         })();
         return true;
@@ -1381,6 +1516,39 @@
     listenWindowMessages();
     listenExtensionMessages();
     settings = await window.tbpSettings.getSettings();
+
+    // 快捷键：一键开/关叠加提示（默认 E；在输入框/聊天打字时不触发）
+    try {
+      if (!window.__tbpHotkeyInstalled) {
+        window.__tbpHotkeyInstalled = true;
+        window.addEventListener("keydown", (e) => {
+          try {
+            if (!settings) return;
+            const key = String(settings?.toggleKey || "").trim();
+            if (!key) return;
+            if (e.repeat) return;
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+            const active = document.activeElement;
+            const tag = String(active?.tagName || "").toLowerCase();
+            const typing = tag === "input" || tag === "textarea" || tag === "select" || !!active?.isContentEditable;
+            if (typing) return;
+
+            const want = key.length === 1 ? key.toUpperCase() : key.toUpperCase();
+            const got = String(e.key || "").toUpperCase();
+            if (want !== got) return;
+
+            const nextEnabled = !settings.enabled;
+            settings = window.tbpSettings.withDefaults({ ...(settings || {}), enabled: nextEnabled });
+            window.tbpSettings.setSettings({ enabled: nextEnabled });
+
+            if (nextEnabled) computeLive();
+            draw();
+          } catch {}
+        });
+      }
+    } catch {}
+
     try {
       const vp = settings?.boundsLockedViewport;
       const hasVp = Number.isFinite(vp?.w) && Number.isFinite(vp?.h) && vp.w > 0 && vp.h > 0;

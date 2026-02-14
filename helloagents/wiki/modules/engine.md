@@ -5,28 +5,42 @@
 
 ## 模块概述
 - **职责:** 基于 GameState 输出 Suggestion（实时）与 Plan（详情页用）
-- **状态:** ✅叠加提示已接入 Cold Clear v1；⚠️详情页完整摆法仍是占位规划
-- **最后更新:** 2026-02-11
+- **状态:** ✅叠加提示默认优先走 Cold Clear 2（本地服务）；✅连不上会自动回退 Cold Clear 1（插件内 WASM）；⚠️详情页“后续步骤”仍是简化规划（先够用）
+- **最后更新:** 2026-02-14
 
 ## 现状（现在代码怎么做的）
 相关代码在：
 - `extension/content/content.js`：从 state 拿实时局面，向后台请求“当前块推荐落点”，并把结果画到叠加层
-- `extension/offscreen/offscreen.js`：offscreen 文档里跑 Cold Clear（WASM/Worker），按 TBP 协议给建议
-- `extension/engine/coldClearTbpClient.js`：TBP 客户端（rules/start/suggest，拿 suggestion 的落点）
-- `extension/shared/tetris-sim.js`：兜底用的简化引擎（当 Cold Clear 不可用时回退）
+- `extension/sw.js`：引擎路由（优先本地 CC2；失败自动回退 CC1）
+- `cc2-server/server.js`：本地 CC2 服务（HTTP），内部用 stdin/stdout 驱动 `cold-clear-2`（TBP）
+- `extension/offscreen/offscreen.js`：CC1 路线：offscreen 文档里跑 Cold Clear v1（WASM/Worker）
+- `extension/engine/coldClearTbpClient.js`：CC1 的 TBP 客户端（rules/start/suggest，拿 suggestion 的落点）
+- `extension/shared/tetris-sim.js`：目前用于**详情页的“后续步骤预览”**（不是实时叠加层的兜底）
+- `extension/engine/sevenBagQueue.js`：7-bag 变长队列（6→12→…→6）构造
 
 当前实现分两层：
-- **实时叠加层（当前块建议）**：只走 Cold Clear v1（WASM，离线）。如果 cold-clear 失败，就会“暂时不显示建议”，而不是回退到另一套逻辑（避免你看到两套结果对不上）。
-- **详情页（实时，步骤列表）**：目前还是用简化规划（beam search）来给出「当前块 + Next5」步骤（后续再升级成“也用 Cold Clear 或更强引擎来生成完整计划”）。
+- **实时叠加层（当前块建议）**：
+  - 默认优先走 **Cold Clear 2（CC2，本地服务）**：更强、更像对战。
+  - 如果扩展连不上本地 CC2，会自动回退到 **Cold Clear 1（CC1，WASM，离线）**。
+  - 如果两边都失败：就会“暂时不显示建议”，并在弹窗/详情页里写出原因，避免你看到两套结果对不上。
+- **详情页（实时，步骤列表）**：
+  - “实时落点”：和叠加层同一份结果（以详情页为准）
+  - “后续步骤”：目前还是简化规划（beam search）给出「当前块 + Next5」的预览（后续再升级成“也用 Cold Clear 或更强引擎生成完整计划”）
 
 注意：
-- 如果浏览器不支持/禁用了 offscreen，或 cold-clear worker 启动失败，实时建议会暂时拿不到；弹窗（调试模式）会显示 `cold-clear：...` 的原因。
+- CC2 需要你本机先启动服务：见 `cc2-server/README.md`。
+- 如果浏览器不支持/禁用了 offscreen，或 CC1 的 cold-clear worker 启动失败：兜底也可能跑不起来；弹窗会显示 `cold-clear：...` 的原因。
 - **7-bag 预判（已增强）**：默认会读取更长的块序，并按 7-bag 的“分袋边界”把 next 队列喂给 cold-clear（6→12→…→6 循环），帮它做更远的规划（不只 Next5）。你也可以在设置里把它关掉做对比（会退回只看 Next5）。
 - **稳定性修复（关键）**：短队列（current+next5）时，`bag_state` 现在只从“队列末尾”反推，避免跨袋重复把 cold-clear 喂到不可能的 randomizer 状态里，导致 `RuntimeError: unreachable` 崩溃回退。
 - **Zen 撤回/重开（暂不防抖）**：如果检测到帧号倒退（时间回退），目前会立即 reset cold-clear，避免带着旧局面继续算导致串状态/超时（你如果想恢复“防抖 + 限流”，我们再加回来）。
-- **对战更像“会打旋转”**：对战模式下，如果 cold-clear 给了多个候选落点，我们会优先选出能打 T-Spin/Spin 的落点（取决于设置里的“对战旋转判定”），避免死板地永远只拿第 1 名导致观感像“纯消行”。
+- **策略到底是谁做？**
+  - **CC2：**它自己内部就带“对战倾向”的评分（我们按 TBP 规范直接取第 1 名），所以**不需要我们前端再写一套“策略”**。
+  - **CC1（兜底）：**它会返回多个候选，我们才会用设置项决定“最终画哪一个”（严格第 1 名 / 偏好旋转 / 实验伤害重排）。
 - **候选落点为什么会有很多个？它的“推荐理由”是什么？**  
   cold-clear 会返回一个候选列表（按它自己的内部评分从更推荐到更不推荐排序）。我们能直接看到的是：排行、落点、是否 spin、是否需要 hold；但**拿不到它内部每个候选的具体分数/权重**。所以你看到的“推荐理由”本质上就是：它那套黑盒评分觉得这个更好。我们目前做的对战预设，就是在候选里做一个“更像对战”的二次选择（例如优先挑有 T-Spin 的候选），而不是完全照第 1 名照搬。
+
+- **对战上下文（combo / B2B）**：
+  TBP 的 `start` 消息支持 `combo` 和 `back_to_back`。我们现在会尽量从 `ejectState()` 提取这两个值并喂给 cold-clear（提取不到就用默认值）。这样它至少“知道你现在是不是在连击/B2B中”，不会像完全不知道上下文那样出招。
 - **为什么 undo 回到同一局面，cc 有时会给不同建议？**  
   为了符合你想要的“一致性”，我们加了一个很直观的做法：**同一个局面+同一串 next（喂给 cc 的块序）+同一套设置，只要算过一次，就直接复用这次结果**。这样 undo 回去就不会“又换了一种建议”。  
   （这不是说 cc 一定随机，而是我们不想让你被“重复算出的不同答案”干扰。）  
@@ -58,3 +72,9 @@
 
 ## 依赖
 - cold-clear（参考实现/未来接入的强力引擎）
+
+## 参考（对战伤害规则）
+> 说明：tetr.io 的规则可能会更新；我们把“按伤害估算重排”标记为实验，就是为了避免把它当成绝对真理。
+
+- TETR.IO 规则整理（含 B2B/连击/伤害等）：`https://tetris.wiki/TETR.IO`
+- 伤害表对照（用于交叉验证）：`https://tetris.johnbeak.cz/`

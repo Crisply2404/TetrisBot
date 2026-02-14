@@ -1,8 +1,23 @@
 (() => {
   const DEFAULT_SETTINGS = {
     enabled: true,
+    // 引擎优先级：
+    // - cc2：优先用“本地 Cold Clear 2 服务”（更强）；连不上就自动回退到 cc1
+    // - cc1：强制只用扩展内置 Cold Clear 1（WASM，离线）
+    engineMode: "cc2",
+    // 本地 cc2 服务地址（默认就是我们仓库里的 cc2-server/server.js）
+    cc2BaseUrl: "http://127.0.0.1:47123",
+    // cc2 这次请求最多等多久（毫秒）。越大越稳但越可能“慢半拍”。
+    cc2TimeoutMs: 900,
     modePreset: "40l",
     allowedSpins: "tspins",
+    // Cold Clear 返回多个候选落点时，前端如何挑选“最终要画出来的那个”
+    // - strict: 严格选第 1 名（最符合 TBP 规范，也更一致）
+    // - preferSpins: 在前 N 名里更偏好旋转（更像打旋，但不保证最优）
+    // - damage: （实验）按伤害估算重排（不保证与 tetr.io 完全一致）
+    pickStrategy: "strict",
+    // 快捷键：一键开/关叠加提示（默认 E；留空=关闭快捷键）
+    toggleKey: "E",
     useHold: true,
     opacity: 0.45,
     // 读取更长块序：默认开启（并按 6 → 12 → … → 6 的变长队列策略喂给 cold-clear）

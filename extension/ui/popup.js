@@ -40,6 +40,19 @@ function bindRange(id, value, onChange) {
   el.addEventListener("input", () => onChange(Number(el.value)));
 }
 
+function setHidden(id, hidden) {
+  const el = document.getElementById(id);
+  if (el) el.hidden = !!hidden;
+}
+
+function applyCalibToolsVisibility(isCalibMode) {
+  // “校准/采样工具”只在校准/采样模式时显示（减少弹窗干扰）
+  setHidden("calibrate", !isCalibMode);
+  setHidden("copyCalib", !isCalibMode);
+  setHidden("openScaleLab", !isCalibMode);
+  setHidden("openSamples", !isCalibMode);
+}
+
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(String(text));
@@ -55,11 +68,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindToggle("enabled", s.enabled, (v) => window.tbpSettings.setSettings({ enabled: v }));
   bindToggle("useHold", s.useHold, (v) => window.tbpSettings.setSettings({ useHold: v }));
   bindSelect("modePreset", s.modePreset, (v) => window.tbpSettings.setSettings({ modePreset: v }));
+  bindSelect("alignMode", s.boundsLock ? "calib" : "pixi", (v) => {
+    const isCalibMode = String(v) === "calib";
+    applyCalibToolsVisibility(isCalibMode);
+    window.tbpSettings.setSettings({ boundsLock: isCalibMode });
+  });
   bindRange("opacity", s.opacity, (v) => {
     setText("opacityVal", `当前透明度：${Math.round(v * 100)}%`);
     window.tbpSettings.setSettings({ opacity: v });
   });
   setText("opacityVal", `当前透明度：${Math.round(s.opacity * 100)}%`);
+
+  applyCalibToolsVisibility(!!s.boundsLock);
 
   const tab = await getActiveTetrioTab();
   if (!tab) {
@@ -86,6 +106,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       parts.push(basics);
 
       if (resp.engine) parts.push(`引擎=${resp.engine}`);
+      try {
+        const wantCc2 = String(s?.engineMode || "cc2") === "cc2";
+        if (wantCc2 && resp.engine && resp.engine !== "cold-clear-2") {
+          parts.push("提示：当前设置是“优先本地 CC2”，但没连上，所以用了 CC1 兜底。要用 CC2 请先启动 cc2-server。");
+        }
+      } catch {}
+      if (resp.alignSource) parts.push(`对齐=${resp.alignSource}`);
 
       if (resp.boundsUsed && Number.isFinite(resp.boundsUsed.width) && Number.isFinite(resp.boundsUsed.height)) {
         parts.push(`定位=${Math.round(resp.boundsUsed.width)}x${Math.round(resp.boundsUsed.height)}（${resp.boundsMode || "?"}）`);
@@ -93,10 +120,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (resp.boundsMeta?.object) {
         const m = resp.boundsMeta;
         const origin = `${m.object}/${m.mode || "-"}`;
+        const src = m.source ? ` ${m.source}` : "";
         const scale = m.scaleX && m.scaleY ? ` scale=${m.scaleX}x${m.scaleY}` : "";
         const dpr = Number.isFinite(m.dpr) ? ` dpr=${m.dpr}` : "";
         const score = Number.isFinite(m.score) ? ` score=${m.score}` : "";
-        parts.push(`来源=${origin}${scale}${dpr}${score}`);
+        parts.push(`来源=${origin}${src}${scale}${dpr}${score}`);
       }
 
       if (!resp.hasSuggestion && resp.engineDebug?.reason) {
@@ -141,6 +169,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
     const url = chrome.runtime.getURL(`ui/scaleLab.html?tabId=${tab2.id}`);
+    chrome.tabs.create({ url });
+  });
+
+  document.getElementById("openSamples")?.addEventListener("click", async () => {
+    const url = chrome.runtime.getURL("ui/samples.html");
     chrome.tabs.create({ url });
   });
 

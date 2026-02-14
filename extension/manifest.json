@@ -7,7 +7,7 @@
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "permissions": ["storage", "scripting", "offscreen"],
-  "host_permissions": ["https://tetr.io/*"],
+  "host_permissions": ["https://tetr.io/*", "http://127.0.0.1/*", "http://localhost/*"],
   "background": {
     "service_worker": "sw.js"
   },

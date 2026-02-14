@@ -7,6 +7,7 @@
       this._ctx = null;
       this._bounds = null;
       this._lastDrawKey = "";
+      this._lastClearRect = null;
 
       this._calibLayer = null;
       this._calibBox = null;
@@ -51,6 +52,8 @@
       canvas.style.position = "fixed";
       canvas.style.left = "0";
       canvas.style.top = "0";
+      canvas.style.width = "100vw";
+      canvas.style.height = "100vh";
       canvas.style.zIndex = "2147483647";
       canvas.style.pointerEvents = "none";
 
@@ -71,16 +74,22 @@
       btnSave.className = "primary";
       btnSave.textContent = "保存校准";
 
+      const btnSaveSample = document.createElement("button");
+      btnSaveSample.type = "button";
+      btnSaveSample.textContent = "保存为样本";
+
       const btnCancel = document.createElement("button");
       btnCancel.type = "button";
       btnCancel.textContent = "取消";
 
       const hint = document.createElement("div");
       hint.id = "tbp-calib-hint";
-      hint.textContent = "校准模式：先拖到差不多的位置，点“吸附对齐”让框更标准；再微调到刚好盖住棋盘（10x20 可见区域），最后点“保存校准”。";
+      hint.textContent =
+        "校准模式：先拖到差不多的位置，点“吸附对齐”让框更标准；再微调到刚好盖住棋盘（10x20 可见区域）。点“保存校准”只保存本次对齐；点“保存为样本”会额外加入自适应模型。";
 
       toolbar.appendChild(btnSnap);
       toolbar.appendChild(btnSave);
+      toolbar.appendChild(btnSaveSample);
       toolbar.appendChild(btnCancel);
       toolbar.appendChild(hint);
       calibLayer.appendChild(toolbar);
@@ -109,23 +118,22 @@
 
       btnSnap.addEventListener("click", () => this._snapCalibration());
       btnSave.addEventListener("click", () => this._commitCalibration());
+      btnSaveSample.addEventListener("click", () => this._commitCalibrationSample());
       btnCancel.addEventListener("click", () => this._cancelCalibration());
+    }
+
+    isCalibrating() {
+      return !!this._calibActive;
     }
 
     setBounds(bounds) {
       this.ensure();
       this._bounds = bounds;
-      if (!bounds || !this._canvas || !this._ctx) return;
-
-      const { x, y, width, height } = bounds;
-      this._canvas.style.left = `${Math.round(x)}px`;
-      this._canvas.style.top = `${Math.round(y)}px`;
-      this._canvas.style.width = `${Math.round(width)}px`;
-      this._canvas.style.height = `${Math.round(height)}px`;
+      if (!this._canvas || !this._ctx) return;
 
       const dpr = window.devicePixelRatio || 1;
-      const nextW = Math.max(1, Math.round(width * dpr));
-      const nextH = Math.max(1, Math.round(height * dpr));
+      const nextW = Math.max(1, Math.round((window.innerWidth || 1) * dpr));
+      const nextH = Math.max(1, Math.round((window.innerHeight || 1) * dpr));
       if (this._canvas.width !== nextW || this._canvas.height !== nextH) {
         this._canvas.width = nextW;
         this._canvas.height = nextH;
@@ -133,12 +141,14 @@
 
       this._ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       this._lastDrawKey = "";
+      this._lastClearRect = null;
     }
 
     clear() {
       if (!this._canvas || !this._ctx) return;
-      this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+      this._ctx.clearRect(0, 0, window.innerWidth || this._canvas.width, window.innerHeight || this._canvas.height);
       this._lastDrawKey = "";
+      this._lastClearRect = null;
     }
 
     _setCalibBoxRect(r) {
@@ -198,6 +208,20 @@
     _commitCalibration() {
       const rect = this._getCalibBoxRect();
       if (this._calibCallbacks?.onSave && rect) {
+        try {
+          this._calibCallbacks.onSave(rect);
+        } catch {}
+      }
+      this.stopCalibration();
+    }
+
+    _commitCalibrationSample() {
+      const rect = this._getCalibBoxRect();
+      if (this._calibCallbacks?.onSaveSample && rect) {
+        try {
+          this._calibCallbacks.onSaveSample(rect);
+        } catch {}
+      } else if (this._calibCallbacks?.onSave && rect) {
         try {
           this._calibCallbacks.onSave(rect);
         } catch {}
@@ -335,11 +359,9 @@
       const visibleRows = Number.isFinite(boardMeta?.visibleRows) ? Number(boardMeta.visibleRows) : 20;
       const bufferRows = Number.isFinite(boardMeta?.bufferRows) ? Number(boardMeta.bufferRows) : 0;
 
-      const key = JSON.stringify({ suggestion, opacity, bounds: this._bounds });
+      const key = JSON.stringify({ suggestion, opacity, bounds: this._bounds, visibleRows, bufferRows, debug: !!settings?.debug });
       if (key === this._lastDrawKey) return;
       this._lastDrawKey = key;
-
-      this._ctx.clearRect(0, 0, this._bounds.width, this._bounds.height);
 
       const isDebug = !!settings?.debug;
       const lockEnabled = !!settings?.boundsLock;
@@ -355,47 +377,95 @@
         bufferRows > 0 && totalRows > visibleRows && Math.abs(ratio - expectedTotalRatio) < Math.abs(ratio - expectedVisibleRatio);
 
       const rowsInBounds = boundsLooksLikeTotalRows ? totalRows : visibleRows;
-      const cellW = this._bounds.width / 10;
-      const cellH = this._bounds.height / Math.max(1, rowsInBounds);
+      // 一些模式/皮肤下，getBounds() 会把边框/阴影也算进来，导致“格子不是正方形”→ 看起来比手动校准更不准。
+      // 这里在“非锁定（自动）”模式下，做一个很保守的“正方形收敛”：只在宽高推导出的格子尺寸差很多时才缩小到正方形。
+      let bx = this._bounds.x;
+      let by = this._bounds.y;
+      let bw = this._bounds.width;
+      let bh = this._bounds.height;
+      let cellW = bw / 10;
+      let cellH = bh / Math.max(1, rowsInBounds);
+      if (!lockEnabled) {
+        const diff = Math.abs(cellW - cellH) / Math.max(1e-6, Math.max(cellW, cellH));
+        if (diff > 0.07) {
+          const cell = Math.min(cellW, cellH);
+          const w2 = 10 * cell;
+          const h2 = rowsInBounds * cell;
+          bx += (bw - w2) / 2;
+          by += (bh - h2) / 2;
+          bw = w2;
+          bh = h2;
+          cellW = bw / 10;
+          cellH = bh / Math.max(1, rowsInBounds);
+        }
+      }
+
       const originY = boundsLooksLikeTotalRows ? bufferRows * cellH : 0;
+
+      // 全屏 canvas 上“只清理相关区域”，避免每次都清整屏导致卡顿
+      const margin = 6;
+      const extraTop = boundsLooksLikeTotalRows ? 0 : bufferRows * cellH;
+      const clearNext = {
+        x: Math.max(0, Math.floor(bx - margin)),
+        y: Math.max(0, Math.floor(by - extraTop - margin)),
+        w: Math.min(window.innerWidth, Math.ceil(bw + margin * 2)),
+        h: Math.min(window.innerHeight, Math.ceil(bh + extraTop + margin * 2))
+      };
+      if (this._lastClearRect) {
+        this._ctx.clearRect(this._lastClearRect.x, this._lastClearRect.y, this._lastClearRect.w, this._lastClearRect.h);
+      }
+      this._ctx.clearRect(clearNext.x, clearNext.y, clearNext.w, clearNext.h);
+      this._lastClearRect = clearNext;
 
       if (isDebug) {
         this._ctx.save();
         this._ctx.globalAlpha = 0.22;
         this._ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
         this._ctx.lineWidth = 1;
-        this._ctx.strokeRect(0.5, 0.5, this._bounds.width - 1, this._bounds.height - 1);
+        this._ctx.strokeRect(
+          bx + 0.5,
+          by + 0.5,
+          bw - 1,
+          bh - 1
+        );
         if (boundsLooksLikeTotalRows) {
           // 标出“可见 20 行”区域（在总行数 bounds 的底部）
           this._ctx.strokeStyle = "rgba(0, 255, 170, 0.55)";
-          this._ctx.strokeRect(0.5, originY + 0.5, this._bounds.width - 1, visibleRows * cellH - 1);
+          this._ctx.strokeRect(
+            bx + 0.5,
+            by + originY + 0.5,
+            bw - 1,
+            visibleRows * cellH - 1
+          );
         }
         // 竖线 10 列
         for (let x = 1; x < 10; x++) {
-          const px = x * cellW;
+          const px = bx + x * cellW;
           this._ctx.beginPath();
-          this._ctx.moveTo(px, 0);
-          this._ctx.lineTo(px, this._bounds.height);
+          this._ctx.moveTo(px, by);
+          this._ctx.lineTo(px, by + bh);
           this._ctx.stroke();
         }
         // 横线 rowsInBounds 行
         const rowCount = Math.min(60, Math.max(1, Math.round(rowsInBounds)));
         for (let y = 1; y < rowCount; y++) {
-          const py = y * cellH;
+          const py = by + y * cellH;
           this._ctx.beginPath();
-          this._ctx.moveTo(0, py);
-          this._ctx.lineTo(this._bounds.width, py);
+          this._ctx.moveTo(bx, py);
+          this._ctx.lineTo(bx + bw, py);
           this._ctx.stroke();
         }
 
         // 左上角打一个小字，方便用户截图反馈“当前映射到底选了啥”
         this._ctx.globalAlpha = 0.85;
         this._ctx.fillStyle = "rgba(0,0,0,0.55)";
-        this._ctx.fillRect(6, 6, 220, 44);
+        const labelX = Math.max(6, bx + 6);
+        const labelY = Math.max(6, by - extraTop + 6);
+        this._ctx.fillRect(labelX, labelY, 220, 44);
         this._ctx.fillStyle = "rgba(255,255,255,0.92)";
         this._ctx.font = "12px system-ui, -apple-system, Segoe UI, sans-serif";
-        this._ctx.fillText(`ratio=${ratio.toFixed(3)} rows=${rowsInBounds}`, 12, 24);
-        this._ctx.fillText(`vis=${visibleRows} buf=${bufferRows} originY=${originY.toFixed(1)}`, 12, 40);
+        this._ctx.fillText(`ratio=${ratio.toFixed(3)} rows=${rowsInBounds}`, labelX + 6, labelY + 18);
+        this._ctx.fillText(`vis=${visibleRows} buf=${bufferRows} originY=${originY.toFixed(1)}`, labelX + 6, labelY + 34);
         this._ctx.restore();
       }
 
@@ -408,9 +478,12 @@
 
       for (const cell of suggestion.cells) {
         const vy = cell.y - bufferRows;
-        if (vy < 0 || vy >= visibleRows) continue;
-        const x = cell.x * cellW;
-        const y = originY + vy * cellH;
+        if (!Number.isFinite(cell?.x) || !Number.isFinite(cell?.y)) continue;
+        if (cell.x < 0 || cell.x >= 10) continue;
+        // 允许显示上方缓冲区：vy < 0 也照画
+        if (vy >= visibleRows) continue;
+        const x = bx + cell.x * cellW;
+        const y = by + originY + vy * cellH;
         this._ctx.fillRect(x + 1, y + 1, cellW - 2, cellH - 2);
         this._ctx.strokeRect(x + 1, y + 1, cellW - 2, cellH - 2);
       }

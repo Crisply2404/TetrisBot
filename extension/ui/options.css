@@ -43,7 +43,8 @@ body {
 }
 
 .row select,
-.row input[type="number"] {
+.row input[type="number"],
+.row input[type="text"] {
   background: #0f1114;
   color: #eaeaea;
   border: 1px solid #2a2f39;
@@ -79,4 +80,3 @@ input:focus-visible {
   outline: 2px solid rgba(0, 255, 170, 0.6);
   outline-offset: 2px;
 }
-

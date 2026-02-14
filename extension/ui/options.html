@@ -19,6 +19,25 @@
           <input id="enabled" type="checkbox" />
         </label>
         <label class="row">
+          <span>引擎优先级</span>
+          <select id="engineMode">
+            <option value="cc2">优先本地 CC2（推荐）</option>
+            <option value="cc1">只用插件 CC1（兜底）</option>
+          </select>
+        </label>
+        <label class="row">
+          <span>本地 CC2 地址</span>
+          <input id="cc2BaseUrl" type="text" placeholder="http://127.0.0.1:47123" />
+        </label>
+        <label class="row">
+          <span>CC2 超时(ms)</span>
+          <input id="cc2TimeoutMs" type="number" min="200" max="5000" step="50" />
+        </label>
+        <label class="row">
+          <span>快捷键：开/关提示</span>
+          <input id="toggleKey" type="text" maxlength="1" placeholder="E" />
+        </label>
+        <label class="row">
           <span>允许用 Hold</span>
           <input id="useHold" type="checkbox" />
         </label>
@@ -34,6 +53,14 @@
           <select id="allowedSpins">
             <option value="tspins">先做 T-Spin（默认）</option>
             <option value="allspins">All-Spin（以后再加强）</option>
+          </select>
+        </label>
+        <label class="row">
+          <span>候选挑选策略</span>
+          <select id="pickStrategy">
+            <option value="strict">严格选第 1 名（推荐）</option>
+            <option value="preferSpins">偏好旋转（更像打旋）</option>
+            <option value="damage">（实验）按伤害估算重排</option>
           </select>
         </label>
         <label class="row">

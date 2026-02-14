@@ -33,6 +33,7 @@
 | 202602120129 | fix_overlay_details_desync_and_restore_fullbag_toggle | 修复/变更 | [?]待确认 | ../history/2026-02/202602120129_fix_overlay_details_desync_and_restore_fullbag_toggle/ |
 | 202602121600 | fix_cc_illegal_placement | 修复 | [√]已完成 | ../history/2026-02/202602121600_fix_cc_illegal_placement/ |
 | 202602121730 | adaptive_calibration_and_zen_refresh | 修复/增强 | [√]已完成 | ../history/2026-02/202602121730_adaptive_calibration_and_zen_refresh/ |
+| 202602122130 | vs_optimal_and_sampling_editor | 增强/变更 | [?]待确认 | ../history/2026-02/202602122130_vs_optimal_and_sampling_editor/ |
 
 ---
 
@@ -65,3 +66,4 @@
 - `202602120129_fix_overlay_details_desync_and_restore_fullbag_toggle`（修复/变更：悬浮提示与详情页默认落点一致；丢弃过期建议避免不同步；恢复读取更长块序开关；undo reset 暂时不防抖）
 - `202602121600_fix_cc_illegal_placement`（修复：TBP 坐标换算按 spec 修正 I/O 中心点；新增落点合法性校验，避免画出“压到已有块/越界”的不可能提示）
 - `202602121730_adaptive_calibration_and_zen_refresh`（增强：缩放/窗口变化时按采样点自适应重算校准；修复：Zen 开局/切局面不再短暂显示上一局建议）
+- `202602122130_vs_optimal_and_sampling_editor`（增强/变更：对战更像“选最优解”；采样点管理页；自动对齐优先；快捷键开关；详情页/叠加层显示上边界之外）

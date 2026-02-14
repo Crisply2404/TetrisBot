@@ -1,4 +1,55 @@
 const injectedTabs = new Set();
+const lastCc2BaseUrlByTab = new Map();
+
+function normalizeCc2BaseUrl(raw) {
+  const s = String(raw || "").trim().replace(/\/+$/, "");
+  return s || "http://127.0.0.1:47123";
+}
+
+async function fetchJsonWithTimeout(url, { method = "GET", headers = null, body = null, timeoutMs = 1000 } = {}) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), Math.max(50, Number(timeoutMs) || 1000));
+  try {
+    const resp = await fetch(url, {
+      method,
+      headers: headers || undefined,
+      body: body || undefined,
+      signal: ctrl.signal
+    });
+    const text = await resp.text().catch(() => "");
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { ok: false, error: `cc2 返回不是 JSON（HTTP ${resp.status}）` };
+    }
+  } catch (e) {
+    const msg = String(e?.message || e || "fetch failed");
+    return { ok: false, error: msg.includes("aborted") ? "cc2 请求超时" : `cc2 连接失败：${msg}` };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function requestColdClear2Suggestion(tabId, payload) {
+  const settings = payload?.settings || null;
+  const baseUrl = normalizeCc2BaseUrl(settings?.cc2BaseUrl);
+  lastCc2BaseUrlByTab.set(tabId, baseUrl);
+  const timeoutMs = Number(settings?.cc2TimeoutMs) || 900;
+  const url = `${baseUrl}/suggest`;
+  return await fetchJsonWithTimeout(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload || {}),
+    timeoutMs
+  });
+}
+
+async function requestColdClear2Reset(tabId) {
+  const baseUrl = normalizeCc2BaseUrl(lastCc2BaseUrlByTab.get(tabId));
+  const url = `${baseUrl}/reset`;
+  // reset 失败不算致命：兜底 cc1 还能继续跑
+  return await fetchJsonWithTimeout(url, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", timeoutMs: 800 });
+}
 
 function injectMainWorld(tabId, sendResponse) {
   if (!tabId) {
@@ -127,6 +178,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const tabId = sender?.tab?.id;
       if (!tabId) return { ok: false, error: "缺少 tabId" };
       const payload = msg.payload || null;
+
+      const mode = String(payload?.settings?.engineMode || "cc2");
+      if (mode !== "cc1") {
+        const cc2 = await requestColdClear2Suggestion(tabId, payload);
+        if (cc2?.ok && cc2.move) return cc2;
+
+        // cc2 不可用 → 回退 cc1
+        const cc1 = await requestColdClearSuggestion(tabId, payload);
+        if (cc1 && typeof cc1 === "object") {
+          try {
+            cc1.debug = { ...(cc1.debug || null), fallbackFrom: "cc2", cc2Error: cc2?.error || "cc2 不可用" };
+          } catch {}
+          return cc1;
+        }
+        return cc2 || { ok: false, error: "cc2/cc1 都无响应" };
+      }
+
       const resp = await requestColdClearSuggestion(tabId, payload);
       return resp || { ok: false, error: "cold-clear 无响应" };
     })()
@@ -139,8 +207,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const tabId = sender?.tab?.id;
       if (!tabId) return { ok: false, error: "缺少 tabId" };
-      const resp = await requestColdClearReset(tabId);
-      return resp || { ok: false, error: "cold-clear reset 无响应" };
+      // 两边都 reset 一下（cc2 失败不致命）
+      const cc2 = await requestColdClear2Reset(tabId);
+      const cc1 = await requestColdClearReset(tabId);
+      return { ok: !!(cc1?.ok || cc2?.ok), cc2: cc2 || null, cc1: cc1 || null };
     })()
       .then((resp) => sendResponse(resp))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));

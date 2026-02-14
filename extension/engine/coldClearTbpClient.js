@@ -62,6 +62,285 @@
     return ((x % m) + m) % m;
   }
 
+  function tbpPieceCellsNorth(piece) {
+    // TBP 里 y 正向=向上；y=0 是底部。
+    // 注意：TBP spec 里 I / O 的“中心点”会随朝向变化，所以 I/O 不能只靠“北向 + 旋转”来推导。
+    // 这里只保留 “JLTSZ” 的北向定义（它们的中心点是 SRS 的旋转中心，不随朝向变化）。
+    switch (piece) {
+      case "T":
+        return [
+          [-1, 0],
+          [0, 0],
+          [1, 0],
+          [0, 1]
+        ];
+      case "L":
+        return [
+          [-1, 0],
+          [0, 0],
+          [1, 0],
+          [1, 1]
+        ];
+      case "J":
+        return [
+          [-1, 0],
+          [0, 0],
+          [1, 0],
+          [-1, 1]
+        ];
+      case "S":
+        return [
+          [-1, 0],
+          [0, 0],
+          [0, 1],
+          [1, 1]
+        ];
+      case "Z":
+        return [
+          [-1, 1],
+          [0, 1],
+          [0, 0],
+          [1, 0]
+        ];
+      default:
+        return null;
+    }
+  }
+
+  function rotateCell(orientation, x, y) {
+    // TBP rotation：east=(y,-x) south=(-x,-y) west=(-y,x)
+    switch (orientation) {
+      case "east":
+        return [y, -x];
+      case "south":
+        return [-x, -y];
+      case "west":
+        return [-y, x];
+      case "north":
+      default:
+        return [x, y];
+    }
+  }
+
+  function tbpPieceCellsRelativeToCenter(piece, orientation) {
+    // 返回相对 TBP location (x,y) 的 4 个 mino 偏移（坐标系：x 向右，y 向上；y=0 是底部）
+    const o = String(orientation || "north").toLowerCase();
+
+    // TBP spec：O / I 的中心点会随朝向变化（定义为某个特定 mino）。
+    if (piece === "O") {
+      switch (o) {
+        case "east":
+          return [
+            [0, 0],
+            [1, 0],
+            [0, -1],
+            [1, -1]
+          ];
+        case "south":
+          return [
+            [0, 0],
+            [-1, 0],
+            [0, -1],
+            [-1, -1]
+          ];
+        case "west":
+          return [
+            [0, 0],
+            [-1, 0],
+            [0, 1],
+            [-1, 1]
+          ];
+        case "north":
+        default:
+          return [
+            [0, 0],
+            [1, 0],
+            [0, 1],
+            [1, 1]
+          ];
+      }
+    }
+
+    if (piece === "I") {
+      switch (o) {
+        case "east":
+          // center = middle-top mino
+          return [
+            [0, -2],
+            [0, -1],
+            [0, 0],
+            [0, 1]
+          ];
+        case "south":
+          // center = middle-right mino
+          return [
+            [-2, 0],
+            [-1, 0],
+            [0, 0],
+            [1, 0]
+          ];
+        case "west":
+          // center = middle-bottom mino
+          return [
+            [0, -1],
+            [0, 0],
+            [0, 1],
+            [0, 2]
+          ];
+        case "north":
+        default:
+          // center = middle-left mino
+          return [
+            [-1, 0],
+            [0, 0],
+            [1, 0],
+            [2, 0]
+          ];
+      }
+    }
+
+    // JLTSZ：中心点不随朝向变化，可以用“北向 + 旋转”推导
+    const base = tbpPieceCellsNorth(piece);
+    if (!base) return null;
+    const out = [];
+    for (const [dx0, dy0] of base) out.push(rotateCell(o, dx0, dy0));
+    return out;
+  }
+
+  function tbpMoveToBottomCells(move, boardHeight = 40) {
+    const piece = normalizePiece(move?.piece);
+    if (!piece) return [];
+    const orientation = String(move?.orientation || "north").toLowerCase();
+    const rel = tbpPieceCellsRelativeToCenter(piece, orientation);
+    if (!rel) return [];
+    const cx = Number(move?.x);
+    const cy = Number(move?.y);
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return [];
+
+    const out = [];
+    for (const [dx, dy] of rel) {
+      const x = cx + dx;
+      const y = cy + dy;
+      out.push({ x, y });
+    }
+    return out;
+  }
+
+  function tbpBoardToBool(board) {
+    if (!Array.isArray(board) || board.length !== 40) return null;
+    const out = new Array(40);
+    for (let y = 0; y < 40; y++) {
+      const row = board[y];
+      const r = new Array(10);
+      for (let x = 0; x < 10; x++) r[x] = !!row?.[x];
+      out[y] = r;
+    }
+    return out;
+  }
+
+  function simulateTbpPlacement(boardBool, cellsBottom) {
+    const height = 40;
+    const width = 10;
+    if (!boardBool) return { ok: false, reason: "no-board" };
+    const grid = boardBool.map((r) => r.slice());
+
+    // 放置：允许 y>=40（上边界之外）存在，但不参与碰撞/消行统计（更贴近 tetr.io 的“上方缓冲区”体验）
+    for (const c of Array.isArray(cellsBottom) ? cellsBottom : []) {
+      const x = Number(c?.x);
+      const y = Number(c?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, reason: "nan" };
+      if (!Number.isInteger(x) || !Number.isInteger(y)) return { ok: false, reason: "non-int" };
+      if (x < 0 || x >= width) return { ok: false, reason: "x-oob" };
+      if (y < 0) return { ok: false, reason: "y-oob" };
+      if (y >= height) continue;
+      if (grid[y][x]) return { ok: false, reason: "collision" };
+      grid[y][x] = true;
+    }
+
+    // 消行
+    let cleared = 0;
+    const kept = [];
+    for (let y = 0; y < height; y++) {
+      const row = grid[y];
+      let full = true;
+      for (let x = 0; x < width; x++) {
+        if (!row[x]) {
+          full = false;
+          break;
+        }
+      }
+      if (full) cleared++;
+      else kept.push(row);
+    }
+    while (kept.length < height) kept.push(new Array(width).fill(false));
+
+    let filledCount = 0;
+    for (const row of kept) for (const v of row) if (v) filledCount++;
+    const allClear = filledCount === 0 && cleared > 0;
+
+    return { ok: true, cleared, allClear };
+  }
+
+  function estimateVsAttack(move, state, settings) {
+    // 备注：这是实验功能（可开关）。它只做“当前一步”的粗略伤害估算，未必和 tetr.io 完全一致。
+    // 伤害规则参考（用于后续校对/更新）：tetris.wiki/TETR.IO、tetris.johnbeak.cz
+    try {
+      const board = boardTopToTbpBoard(state?.board);
+      const boardBool = tbpBoardToBool(board);
+      const cells = tbpMoveToBottomCells(move, 40);
+      const sim = simulateTbpPlacement(boardBool, cells);
+      if (!sim.ok) return { ok: false, score: -Infinity, reason: sim.reason };
+
+      const cleared = Number(sim.cleared || 0);
+      const allClear = !!sim.allClear;
+      const piece = normalizePiece(move?.piece);
+      const spin = String(move?.spin || "none").toLowerCase();
+      const isSpin = spin !== "none";
+
+      const allowedSpins = String(settings?.allowedSpins || "tspins");
+      const allowAll = allowedSpins === "allspins";
+      const allowT = allowedSpins !== "allspins";
+
+      const isTSpin = piece === "T" && isSpin && cleared > 0;
+      const isAnySpin = isSpin && cleared > 0 && (allowAll || (allowT && piece === "T"));
+
+      // 基础伤害（粗略）：优先让“立刻有伤害”的走法靠前
+      let base = 0;
+      if (isTSpin) {
+        const mini = spin === "mini";
+        if (cleared === 1) base = mini ? 1 : 2;
+        else if (cleared === 2) base = mini ? 2 : 4;
+        else if (cleared === 3) base = 6;
+        else base = 0;
+      } else {
+        if (cleared === 4) base = 4;
+        else if (cleared === 3) base = 2;
+        else if (cleared === 2) base = 1;
+        else base = 0;
+        // 非 T 的 all-spin 先只给一点点加成（实验）
+        if (!isTSpin && isAnySpin && piece !== "T") base += 1;
+      }
+
+      const comboNow = Number.isFinite(Number(state?.combo)) ? Math.max(0, Math.floor(Number(state.combo))) : 0;
+      const b2bNow = state?.backToBack === true;
+
+      // B2B 资格：T-spin（含 mini）或 Tetris
+      const b2bClear = (cleared === 4) || isTSpin;
+      const b2bBonus = b2bNow && b2bClear && cleared > 0 ? 1 : 0;
+
+      // 连击：这里只做一个简单的“越高越加分”的近似（实验）
+      const nextCombo = cleared > 0 ? comboNow + 1 : 0;
+      const comboBonus = cleared > 0 ? Math.max(0, Math.min(6, Math.floor(nextCombo / 2))) : 0;
+
+      const allClearBonus = allClear ? 10 : 0;
+
+      const score = base + b2bBonus + comboBonus + allClearBonus;
+      return { ok: true, score, detail: { base, b2bBonus, comboBonus, allClearBonus, cleared, spin } };
+    } catch {
+      return { ok: false, score: -Infinity, reason: "exception" };
+    }
+  }
+
   function extractSuggestionMove(msg, settings, state) {
     if (!msg || msg.type !== "suggestion") return null;
     const moves = Array.isArray(msg.moves) ? msg.moves : Array.isArray(msg.mvs) ? msg.mvs : Array.isArray(msg.payload?.moves) ? msg.payload.moves : null;
@@ -83,49 +362,67 @@
     }
     if (!parsed.length) return null;
 
-    // 默认：用 bot 给的第一个落点（index 最小的那个）
-    let best = parsed[0];
-    for (const p of parsed) if (p.i < best.i) best = p;
-    let pickStrategy = "default:first";
+    const pickFirstByIndex = (arr) => {
+      if (!Array.isArray(arr) || !arr.length) return null;
+      let b = arr[0];
+      for (const x of arr) if (x.i < b.i) b = x;
+      return b;
+    };
 
-    // 对战：如果候选里“前几名”就有能打旋的落点（尤其是 T-spin），优先挑它；
-    // 但不会为了硬打旋转跑去挑很靠后的落点（你说你要的是对战最优解，不是全是 T-Spin）。
+    const allowedNow = allowedMovePiecesForState(state, settings)?.allowed || [];
+    const allowedCandidates = parsed.filter((p) => allowedNow.includes(p.piece)).filter((p) => p.i >= 0);
+    const baseCandidates = allowedCandidates.length ? allowedCandidates : parsed;
+
+    // 选择策略（让“为啥不是选最优解”变成可控选项）
+    const strategy = String(settings?.pickStrategy || "strict");
     const isVs = settings?.modePreset === "vs";
-    if (isVs) {
+
+    // 默认：严格选第 1 名（TBP 规范也是这么建议的）
+    let best = pickFirstByIndex(baseCandidates) || parsed[0];
+    let pickStrategy = "strict:first";
+
+    if (strategy === "preferSpins" && isVs) {
       const allowedSpins = String(settings?.allowedSpins || "tspins");
       const preferAll = allowedSpins === "allspins";
       const preferT = allowedSpins !== "allspins";
-      // 你反馈“几乎从不打旋”，这里把“可考虑的前几名”放宽一点：
-      // - T-spin：最多看前 24 名（仍然很靠前）
-      // - 任意旋：最多看前 12 名（更保守）
+      // 只在“前几名”里偏好旋转，避免硬打旋导致策略变蠢
       const maxRankT = 24;
       const maxRankSpin = 12;
 
-      const allowedNow = allowedMovePiecesForState(state, settings)?.allowed || [];
-      const candidates = parsed.filter((p) => allowedNow.includes(p.piece)).filter((p) => p.i >= 0);
-
-      const spinMoves = candidates.filter((p) => p.spin !== "none");
+      const spinMoves = baseCandidates.filter((p) => p.spin !== "none");
       const tSpinMoves = spinMoves.filter((p) => p.piece === "T");
-
-      const pickFirstByIndex = (arr) => {
-        if (!Array.isArray(arr) || !arr.length) return null;
-        let b = arr[0];
-        for (const x of arr) if (x.i < b.i) b = x;
-        return b;
-      };
-
       const within = (arr, maxRank) => arr.filter((p) => p.i < maxRank);
 
-      // 优先顺序：T-spin（更靠前范围） -> 任意 spin（更保守范围） -> 默认第一名
       const preferredT = preferT ? pickFirstByIndex(within(tSpinMoves, maxRankT)) : null;
       const preferredAny = preferAll ? pickFirstByIndex(within(spinMoves, maxRankSpin)) : null;
-
       const preferred = preferredT || preferredAny || null;
       if (preferred) {
         best = preferred;
         pickStrategy = preferred === preferredT ? `vs:preferT@${maxRankT}` : `vs:preferSpin@${maxRankSpin}`;
       } else {
-        pickStrategy = "vs:default:first";
+        pickStrategy = "vs:preferSpins:fallbackFirst";
+      }
+    } else if (strategy === "damage" && isVs) {
+      const N = 30;
+      const topN = baseCandidates.slice().sort((a, b) => a.i - b.i).slice(0, Math.min(N, baseCandidates.length));
+      let bestByScore = null;
+      let bestScore = -Infinity;
+      for (const c of topN) {
+        const est = estimateVsAttack(c, state, settings);
+        const score = Number(est?.score);
+        if (!Number.isFinite(score)) continue;
+        if (score > bestScore) {
+          bestScore = score;
+          bestByScore = c;
+        } else if (score === bestScore && bestByScore && c.i < bestByScore.i) {
+          bestByScore = c;
+        }
+      }
+      if (bestByScore) {
+        best = bestByScore;
+        pickStrategy = `vs:damage@${topN.length}`;
+      } else {
+        pickStrategy = "vs:damage:fallbackFirst";
       }
     }
 
@@ -373,8 +670,8 @@
           type: "start",
           hold: settings?.useHold ? hold : null,
           queue: q.queue,
-          combo: 0,
-          back_to_back: false,
+          combo: Number.isFinite(Number(state?.combo)) ? Math.max(0, Math.floor(Number(state.combo))) : 0,
+          back_to_back: state?.backToBack === true,
           board,
           randomizer: { type: "seven_bag", bag_state: q.bag_state }
         },
@@ -401,7 +698,11 @@
         .then(async () => {
           const key = `${state?.boardHash || ""}:${state?.current || ""}:${state?.hold || "-"}:${Array.isArray(state?.next) ? state.next.join("") : ""}:${
             settings?.useHold ? "H1" : "H0"
-          }:${settings?.readFullBag ? "B1" : "B0"}`;
+          }:${settings?.readFullBag ? "B1" : "B0"}:${settings?.modePreset || "40l"}:${String(settings?.allowedSpins || "tspins")}:${String(
+            settings?.pickStrategy || "strict"
+          )}:C${Number.isFinite(Number(state?.combo)) ? Math.max(0, Math.floor(Number(state.combo))) : 0}:${
+            state?.backToBack === true ? "B2B1" : "B2B0"
+          }`;
 
           if (key && key === this._lastKey && this._lastResp?.ok) return this._lastResp;
 
