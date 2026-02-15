@@ -341,6 +341,237 @@
     }
   }
 
+  // CC2 默认权重（来自 ref/cold-clear-2/src/default.json 的 freestyle_weights）
+  // 说明：CC1（WASM）本身的内部评分我们改不了；这里做的是“拿 CC1 返回的候选落点，再用 CC2 的权重思路重排一遍”。
+  const CC2_FREESTYLE_WEIGHTS = {
+    cell_coveredness: -0.2,
+    max_cell_covered_height: 6,
+    holes: -1.5,
+    row_transitions: -0.2,
+    height: -0.4,
+    height_upper_half: -1.5,
+    height_upper_quarter: -5.0,
+    tetris_well_depth: 0.3,
+
+    has_back_to_back: 0.5,
+    wasted_t: -1.5,
+
+    normal_clears: [0.0, -2.0, -1.5, -1.0, 3.5],
+    mini_spin_clears: [0.0, -1.5, -1.0],
+    spin_clears: [0.0, 1.0, 4.0, 6.0],
+    back_to_back_clear: 1.0,
+    combo_attack: 1.5,
+    perfect_clear: 15.0,
+    perfect_clear_override: true
+  };
+
+  function clampIndex(i, n) {
+    const x = Number(i);
+    if (!Number.isFinite(x)) return 0;
+    const r = Math.floor(x);
+    if (r < 0) return 0;
+    if (r >= n) return n - 1;
+    return r;
+  }
+
+  function colHeightsFromBottomGrid(grid) {
+    const height = Array.isArray(grid) ? grid.length : 0;
+    const width = 10;
+    const heights = new Array(width).fill(0);
+    if (!height) return heights;
+    for (let x = 0; x < width; x++) {
+      let h = 0;
+      for (let y = height - 1; y >= 0; y--) {
+        if (grid[y]?.[x]) {
+          h = y + 1;
+          break;
+        }
+      }
+      heights[x] = h;
+    }
+    return heights;
+  }
+
+  function countHolesAndCoveredness(grid, maxCoverHeight) {
+    const height = Array.isArray(grid) ? grid.length : 0;
+    const width = 10;
+    let holes = 0;
+    let coveredness = 0;
+    if (!height) return { holes, coveredness };
+
+    for (let x = 0; x < width; x++) {
+      let colHeight = 0;
+      for (let y = height - 1; y >= 0; y--) {
+        if (grid[y]?.[x]) {
+          colHeight = y + 1;
+          break;
+        }
+      }
+      for (let y = 0; y < colHeight; y++) {
+        if (!grid[y]?.[x]) {
+          holes += 1;
+          coveredness += Math.min(colHeight - y, maxCoverHeight);
+        }
+      }
+    }
+
+    return { holes, coveredness };
+  }
+
+  function rowTransitionsHeuristic(grid) {
+    const height = Array.isArray(grid) ? grid.length : 0;
+    const width = 10;
+    let t = 0;
+    if (!height) return 0;
+    for (let y = 0; y < height; y++) {
+      let prev = 1; // 左墙视为满
+      for (let x = 0; x < width; x++) {
+        const cur = grid[y]?.[x] ? 1 : 0;
+        if (cur !== prev) t += 1;
+        prev = cur;
+      }
+      if (prev !== 1) t += 1; // 右墙
+    }
+    return t;
+  }
+
+  function tetrisWellDepthHeuristic(grid, heights) {
+    const height = Array.isArray(grid) ? grid.length : 0;
+    const width = 10;
+    if (!height) return 0;
+    const hs = Array.isArray(heights) ? heights : colHeightsFromBottomGrid(grid);
+    let wellCol = 0;
+    for (let x = 1; x < width; x++) {
+      if (hs[x] < hs[wellCol]) wellCol = x;
+    }
+    const wellH = hs[wellCol] || 0;
+    let depth = 0;
+    for (let y = wellH; y < height; y++) {
+      let ok = true;
+      for (let x = 0; x < width; x++) {
+        if (x === wellCol) continue;
+        if (!grid[y]?.[x]) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok) break;
+      depth += 1;
+    }
+    return depth;
+  }
+
+  function applyTbpPlacementReturnGrid(boardBool, cellsBottom) {
+    const height = 40;
+    const width = 10;
+    if (!boardBool) return { ok: false, reason: "no-board" };
+    const grid = boardBool.map((r) => r.slice());
+
+    for (const c of Array.isArray(cellsBottom) ? cellsBottom : []) {
+      const x = Number(c?.x);
+      const y = Number(c?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, reason: "nan" };
+      if (!Number.isInteger(x) || !Number.isInteger(y)) return { ok: false, reason: "non-int" };
+      if (x < 0 || x >= width) return { ok: false, reason: "x-oob" };
+      if (y < 0) return { ok: false, reason: "y-oob" };
+      if (y >= height) continue; // 上边界之外不参与碰撞/消行
+      if (grid[y][x]) return { ok: false, reason: "collision" };
+      grid[y][x] = true;
+    }
+
+    let cleared = 0;
+    const kept = [];
+    for (let y = 0; y < height; y++) {
+      const row = grid[y];
+      let full = true;
+      for (let x = 0; x < width; x++) {
+        if (!row[x]) {
+          full = false;
+          break;
+        }
+      }
+      if (full) cleared++;
+      else kept.push(row);
+    }
+    while (kept.length < height) kept.push(new Array(width).fill(false));
+
+    let filledCount = 0;
+    for (const row of kept) for (const v of row) if (v) filledCount++;
+    const allClear = filledCount === 0 && cleared > 0;
+
+    return { ok: true, grid: kept, cleared, allClear };
+  }
+
+  function scoreMoveByCc2Weights(candidate, state, weights) {
+    const board = boardTopToTbpBoard(state?.board);
+    const boardBool = tbpBoardToBool(board);
+    const cells = tbpMoveToBottomCells(candidate, 40);
+    const sim = applyTbpPlacementReturnGrid(boardBool, cells);
+    if (!sim.ok) return { ok: false, score: -Infinity, reason: sim.reason };
+
+    const cleared = Number(sim.cleared || 0);
+    const allClear = !!sim.allClear;
+    const grid = sim.grid;
+
+    const piece = normalizePiece(candidate?.piece);
+    const spin = String(candidate?.spin || "none").toLowerCase();
+    const isSpin = spin !== "none";
+    const isTSpinFull = piece === "T" && spin === "full" && cleared > 0;
+    const b2bClear = (cleared === 4) || isTSpinFull;
+
+    const comboNow = Number.isFinite(Number(state?.combo)) ? Math.max(0, Math.floor(Number(state.combo))) : 0;
+    const b2bNow = state?.backToBack === true;
+    const nextCombo = cleared > 0 ? comboNow + 1 : 0;
+
+    let reward = 0.0;
+    let evalv = 0.0;
+
+    if (allClear) reward += weights.perfect_clear;
+
+    if (!allClear || !weights.perfect_clear_override) {
+      if (b2bNow && b2bClear && cleared > 0) reward += weights.back_to_back_clear;
+
+      if (!isSpin) {
+        reward += weights.normal_clears[clampIndex(cleared, weights.normal_clears.length)];
+      } else if (spin === "mini") {
+        reward += weights.mini_spin_clears[clampIndex(cleared, weights.mini_spin_clears.length)];
+      } else {
+        reward += weights.spin_clears[clampIndex(cleared, weights.spin_clears.length)];
+      }
+
+      const comboAttack = Math.floor(Math.max(0, nextCombo - 1) / 2);
+      reward += weights.combo_attack * comboAttack;
+    }
+
+    // checklist：浪费 T（更像 cc2 的“别随便丢 T”）
+    if (piece === "T" && (cleared < 2 || spin !== "full")) reward += weights.wasted_t;
+    if (b2bNow) evalv += weights.has_back_to_back;
+
+    // 结构特征
+    const heights = colHeightsFromBottomGrid(grid);
+    const highest = Math.max(...heights);
+    evalv += weights.height * highest;
+    if (highest > 10) evalv += weights.height_upper_half * (highest - 10);
+    if (highest > 15) evalv += weights.height_upper_quarter * (highest - 15);
+
+    const { holes, coveredness } = countHolesAndCoveredness(grid, Number(weights.max_cell_covered_height) || 6);
+    evalv += weights.holes * holes;
+    evalv += weights.cell_coveredness * coveredness;
+
+    const rt = rowTransitionsHeuristic(grid);
+    evalv += weights.row_transitions * rt;
+
+    const wellDepth = tetrisWellDepthHeuristic(grid, heights);
+    evalv += weights.tetris_well_depth * wellDepth;
+
+    const score = reward + evalv;
+    return {
+      ok: true,
+      score,
+      detail: { cleared, allClear, spin, holes, coveredness, rowTransitions: rt, wellDepth, highest, nextCombo }
+    };
+  }
+
   function extractSuggestionMove(msg, settings, state) {
     if (!msg || msg.type !== "suggestion") return null;
     const moves = Array.isArray(msg.moves) ? msg.moves : Array.isArray(msg.mvs) ? msg.mvs : Array.isArray(msg.payload?.moves) ? msg.payload.moves : null;
@@ -423,6 +654,31 @@
         pickStrategy = `vs:damage@${topN.length}`;
       } else {
         pickStrategy = "vs:damage:fallbackFirst";
+      }
+    }
+
+    if (strategy === "cc2Weights") {
+      // 只对 cc1 做重排：cc2 自己内部就有权重/策略了
+      const N = 40;
+      const topN = baseCandidates.slice().sort((a, b) => a.i - b.i).slice(0, Math.min(N, baseCandidates.length));
+      let bestByScore = null;
+      let bestScore = -Infinity;
+      for (const c of topN) {
+        const est = scoreMoveByCc2Weights(c, state, CC2_FREESTYLE_WEIGHTS);
+        const score = Number(est?.score);
+        if (!Number.isFinite(score)) continue;
+        if (score > bestScore) {
+          bestScore = score;
+          bestByScore = c;
+        } else if (score === bestScore && bestByScore && c.i < bestByScore.i) {
+          bestByScore = c;
+        }
+      }
+      if (bestByScore) {
+        best = bestByScore;
+        pickStrategy = `cc1:cc2Weights@${topN.length}`;
+      } else {
+        pickStrategy = "cc1:cc2Weights:fallbackFirst";
       }
     }
 

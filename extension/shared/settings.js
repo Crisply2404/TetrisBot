@@ -15,6 +15,7 @@
     // - strict: 严格选第 1 名（最符合 TBP 规范，也更一致）
     // - preferSpins: 在前 N 名里更偏好旋转（更像打旋，但不保证最优）
     // - damage: （实验）按伤害估算重排（不保证与 tetr.io 完全一致）
+    // - cc2Weights: 用 cc2 的默认权重“仿一套”在前端重排（只影响 cc1；cc2 本身不需要）
     pickStrategy: "strict",
     // 快捷键：一键开/关叠加提示（默认 E；留空=关闭快捷键）
     toggleKey: "E",

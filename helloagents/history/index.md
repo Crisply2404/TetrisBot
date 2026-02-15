@@ -34,6 +34,7 @@
 | 202602121600 | fix_cc_illegal_placement | 修复 | [√]已完成 | ../history/2026-02/202602121600_fix_cc_illegal_placement/ |
 | 202602121730 | adaptive_calibration_and_zen_refresh | 修复/增强 | [√]已完成 | ../history/2026-02/202602121730_adaptive_calibration_and_zen_refresh/ |
 | 202602122130 | vs_optimal_and_sampling_editor | 增强/变更 | [?]待确认 | ../history/2026-02/202602122130_vs_optimal_and_sampling_editor/ |
+| 202602151845 | cc1_strategy_reset_and_stability | 增强/修复 | [?]待确认 | ../history/2026-02/202602151845_cc1_strategy_reset_and_stability/ |
 
 ---
 
@@ -67,3 +68,4 @@
 - `202602121600_fix_cc_illegal_placement`（修复：TBP 坐标换算按 spec 修正 I/O 中心点；新增落点合法性校验，避免画出“压到已有块/越界”的不可能提示）
 - `202602121730_adaptive_calibration_and_zen_refresh`（增强：缩放/窗口变化时按采样点自适应重算校准；修复：Zen 开局/切局面不再短暂显示上一局建议）
 - `202602122130_vs_optimal_and_sampling_editor`（增强/变更：对战更像“选最优解”；采样点管理页；自动对齐优先；快捷键开关；详情页/叠加层显示上边界之外）
+- `202602151845_cc1_strategy_reset_and_stability`（增强/修复：CC1 仿 CC2 权重策略；悬空落点自救；弹窗强制重置并重抓 API；状态心跳超时兜底）

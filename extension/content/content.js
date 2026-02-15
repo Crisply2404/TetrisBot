@@ -26,6 +26,8 @@
   let lastLockedViewport = null;
   let holdUsedThisTurn = false;
   let calibrationActive = false;
+  let lastAutoResyncKey = "";
+  let lastAutoResyncCount = 0;
 
   // 一致性缓存：同一个局面（board/current/hold/next + 设置）算过一次就复用。
   // 你要求“readFullBag 开/关是两套记忆系统”，所以这里拆成两套缓存（互不影响、互不抢容量）。
@@ -584,6 +586,16 @@
     };
   }
 
+  function canDropFurtherTopCells(cellsTop, board01Top) {
+    try {
+      const down = (Array.isArray(cellsTop) ? cellsTop : []).map((c) => ({ x: c?.x, y: Number(c?.y) + 1 }));
+      const check = validateTopCellsAgainstBoard01(down, board01Top);
+      return { canDrop: !!check.ok, downCells: down, downCheck: check };
+    } catch {
+      return { canDrop: false, downCells: null, downCheck: null };
+    }
+  }
+
   async function requestColdClear(state, settings, sync, requestId) {
     return await new Promise((resolve) => {
       chrome.runtime.sendMessage(
@@ -609,6 +621,66 @@
         resolve(null);
       }
     });
+  }
+
+  async function forceResetAll(reason) {
+    const why = String(reason || "manual");
+
+    // 退出校准模式（避免绿色框还在）
+    try {
+      if (overlay?.stopCalibration) overlay.stopCalibration();
+    } catch {}
+    calibrationActive = false;
+
+    // 清空 UI/状态
+    pageHookReady = false;
+    pageConnected = false;
+    lastPageError = `已强制重置：${why}。正在重新抓取状态…`;
+    lastState = null;
+    lastSuggestion = null;
+    lastEngineDebug = null;
+    lastOverlayBounds = null;
+    lastOverlayBoundsMode = null;
+    lastBaseBounds = null;
+    lastLiveKey = "";
+    liveInFlight = null;
+    liveRequestSeq = 0;
+    lastAppliedLiveRequestId = 0;
+    lastColdClearError = null;
+    lastColdClearDebug = null;
+    holdUsedThisTurn = false;
+    lastLockedViewport = null;
+    lastAutoResyncKey = "";
+    lastAutoResyncCount = 0;
+    detailsCacheKey = "";
+    detailsCacheSuggestion = null;
+    detailsInFlight = null;
+
+    try {
+      ccMem.short.state = null;
+      ccMem.short.move = null;
+      ccMem.short.cells = null;
+      ccMem.long.state = null;
+      ccMem.long.move = null;
+      ccMem.long.cells = null;
+    } catch {}
+    try {
+      liveSemanticCacheShort.clear();
+      liveSemanticCacheLong.clear();
+    } catch {}
+
+    // reset 引擎（cc1/cc2 都会一起 reset）
+    await requestColdClearReset(`force:${why}`);
+
+    // 让 pageHook 清掉已捕获的 API，并重新安装 Map tap（避免“切模式后还读到上一局 API”）
+    postToPage("TBP_RESET_CAPTURE", { reason: why, ts: Date.now() });
+
+    // 兜底：再注入/再 ping 一次（如果页面被热更新/脚本丢了，这里能救回来）
+    injectPageHook();
+    requestMainWorldInjection();
+    postToPage("TBP_PAGE_CONFIG", { readFullBag: !!settings?.readFullBag, debug: !!settings?.debug });
+    pingPageHook();
+    draw();
   }
 
   async function computeLiveAsync() {
@@ -724,6 +796,11 @@
           }，原因=${why}${where}`;
           lastColdClearDebug = {
             ...(resp?.debug || null),
+            resyncReason: "invalid_move",
+            movePiece: p,
+            moveOrientation: o,
+            moveX: Number.isFinite(x) ? x : null,
+            moveY: Number.isFinite(y) ? y : null,
             badMove: { piece: p, orientation: o, x: Number.isFinite(x) ? x : null, y: Number.isFinite(y) ? y : null },
             cellCheck
           };
@@ -743,6 +820,66 @@
             if (semanticKey && cache) cache.delete(semanticKey);
           } catch {}
           await requestColdClearReset(`invalid_move:${why}`);
+          draw();
+          return;
+        }
+
+        // “悬空落点”兜底：如果这个落点整体还能往下掉 1 格，说明我们大概率不同步了（常见于行清/回放/模式切换等边界）。
+        // 处理：先当成不同步，清空建议；自动 reset 一次并等待下一帧重算；同一个语义局面最多自动重置 1 次，避免死循环。
+        const dropCheck = canDropFurtherTopCells(cells, state?.board);
+        if (dropCheck?.canDrop) {
+          const p = String(resp?.move?.piece || "?");
+          const o = String(resp?.move?.orientation || "north");
+          const x = Number(resp?.move?.x);
+          const y = Number(resp?.move?.y);
+          const why = "还能往下掉（悬空落点）";
+          const ex0 = Array.isArray(cells) ? cells[0] : null;
+          const ex1 = Array.isArray(dropCheck?.downCells) ? dropCheck.downCells[0] : null;
+          const where =
+            ex0 && ex1 && Number.isFinite(ex0.x) && Number.isFinite(ex0.y) && Number.isFinite(ex1.x) && Number.isFinite(ex1.y)
+              ? `（比如 ${ex0.x},${ex0.y} -> ${ex1.x},${ex1.y}）`
+              : "";
+
+          // 自动自救：每个语义局面最多 1 次
+          try {
+            if (semanticKey && semanticKey !== lastAutoResyncKey) {
+              lastAutoResyncKey = semanticKey;
+              lastAutoResyncCount = 0;
+            }
+          } catch {}
+          lastAutoResyncCount = Math.max(0, Number(lastAutoResyncCount) || 0) + 1;
+          const willAutoReset = lastAutoResyncCount <= 1;
+
+          lastColdClearError = `cold-clear 不同步：落点${why}${where}${
+            willAutoReset ? "（已自动 reset，等待重算）" : "（已自动 reset 过一次仍异常：请点“强制重置（清缓存）”或刷新）"
+          }`;
+          lastColdClearDebug = {
+            ...(resp?.debug || null),
+            resyncReason: "floating_drop_possible",
+            movePiece: p,
+            moveOrientation: o,
+            moveX: Number.isFinite(x) ? x : null,
+            moveY: Number.isFinite(y) ? y : null,
+            cellCheck,
+            dropCheck
+          };
+
+          // 不要把“悬空落点”写入一致性缓存；并强制 reset，让下一次从 start 重新同步。
+          try {
+            const mem = getCcMem(settings);
+            mem.state = null;
+            mem.move = null;
+            mem.cells = null;
+          } catch {}
+          lastSuggestion = null;
+          lastEngineDebug = settings?.debug ? { engine: lastEngineName, ...lastColdClearDebug, sync } : { preset: settings?.modePreset || "40l", reason: why, sync };
+          lastLiveKey = semanticKey || "";
+          try {
+            const cache = getLiveSemanticCache(settings);
+            if (semanticKey && cache) cache.delete(semanticKey);
+          } catch {}
+
+          if (willAutoReset) await requestColdClearReset("floating_drop_possible");
           draw();
           return;
         }
@@ -1154,41 +1291,45 @@
         ccMem.long.move = null;
         ccMem.long.cells = null;
       } catch {}
-      lastLiveKey = "";
-      liveInFlight = null;
-      lastAppliedLiveRequestId = 0;
-      holdUsedThisTurn = false;
-      try {
-        liveSemanticCacheShort.clear();
-        liveSemanticCacheLong.clear();
-      } catch {}
-      draw();
-      return;
+          lastLiveKey = "";
+          liveInFlight = null;
+          lastAppliedLiveRequestId = 0;
+          holdUsedThisTurn = false;
+          lastAutoResyncKey = "";
+          lastAutoResyncCount = 0;
+          try {
+            liveSemanticCacheShort.clear();
+            liveSemanticCacheLong.clear();
+          } catch {}
+          draw();
+          return;
     }
 
     // Zen 撤回/重开等场景：frame 会倒退。此时必须把 cold-clear 的内部状态也重置，否则容易串状态导致超时/崩溃回退。
     try {
       const prevFrame = Number.isFinite(lastState?.frame) ? Number(lastState.frame) : null;
       const nextFrame = Number.isFinite(nextState?.frame) ? Number(nextState.frame) : null;
-      if (prevFrame !== null && nextFrame !== null && nextFrame < prevFrame) {
-        requestColdClearReset(`rewind:${prevFrame}->${nextFrame}`);
-        try {
-          ccMem.short.state = null;
-          ccMem.short.move = null;
-          ccMem.short.cells = null;
-          ccMem.long.state = null;
-          ccMem.long.move = null;
-          ccMem.long.cells = null;
-        } catch {}
-        lastLiveKey = "";
-        liveInFlight = null;
-        holdUsedThisTurn = false;
-        try {
-          liveSemanticCacheShort.clear();
-          liveSemanticCacheLong.clear();
-        } catch {}
-      }
-    } catch {}
+        if (prevFrame !== null && nextFrame !== null && nextFrame < prevFrame) {
+          requestColdClearReset(`rewind:${prevFrame}->${nextFrame}`);
+          try {
+            ccMem.short.state = null;
+            ccMem.short.move = null;
+            ccMem.short.cells = null;
+            ccMem.long.state = null;
+            ccMem.long.move = null;
+            ccMem.long.cells = null;
+          } catch {}
+          lastLiveKey = "";
+          liveInFlight = null;
+          holdUsedThisTurn = false;
+          lastAutoResyncKey = "";
+          lastAutoResyncCount = 0;
+          try {
+            liveSemanticCacheShort.clear();
+            liveSemanticCacheLong.clear();
+          } catch {}
+        }
+      } catch {}
 
     // Hold 一致性：tetr.io 规则是“每个块最多 hold 一次”，hold 以后直到落地前都不能再 hold。
     // 但我们拿不到一个稳定的 canHold 字段，所以用“状态变化”自己推断：
@@ -1507,6 +1648,15 @@
         })();
         return true;
       }
+      if (msg.type === "TBP_FORCE_RESET") {
+        (async () => {
+          await forceResetAll(String(msg?.reason || "manual"));
+          return { ok: true };
+        })()
+          .then((resp) => sendResponse(resp))
+          .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+        return true;
+      }
     });
   }
 
@@ -1560,6 +1710,59 @@
     postToPage("TBP_PAGE_CONFIG", { readFullBag: !!settings.readFullBag, debug: !!settings.debug });
     pingPageHook();
     draw();
+
+    // 状态心跳兜底：如果一段时间没收到页面消息（常见于切模式/Hook 卡住/页面热更新），
+    // 就清空旧局面，避免你看到“还停留在上一局”的错觉，并提示你点“强制重置（清缓存）”。
+    try {
+      if (!window.__tbpHeartbeatInstalled) {
+        window.__tbpHeartbeatInstalled = true;
+        window.setInterval(() => {
+          try {
+            if (!settings?.enabled) return;
+            if (!pageHookReady) return;
+            if (!lastState) return;
+            const now = Date.now();
+            const last = Number(lastPageMessageAt || 0);
+            if (!last || now - last < 3500) return;
+
+            lastPageError =
+              "状态超时：一段时间没收到页面状态更新（可能切模式/Hook 卡住）。建议点“强制重置（清缓存）”，不行就刷新页面。";
+            requestColdClearReset("state-timeout");
+            pageConnected = false;
+            pageHookReady = false;
+            lastState = null;
+            lastSuggestion = null;
+            lastOverlayBounds = null;
+            lastOverlayBoundsMode = null;
+            lastBaseBounds = null;
+            lastColdClearError = null;
+            lastColdClearDebug = null;
+            try {
+              ccMem.short.state = null;
+              ccMem.short.move = null;
+              ccMem.short.cells = null;
+              ccMem.long.state = null;
+              ccMem.long.move = null;
+              ccMem.long.cells = null;
+            } catch {}
+            lastLiveKey = "";
+            liveInFlight = null;
+            lastAppliedLiveRequestId = 0;
+            holdUsedThisTurn = false;
+            lastAutoResyncKey = "";
+            lastAutoResyncCount = 0;
+            try {
+              liveSemanticCacheShort.clear();
+              liveSemanticCacheLong.clear();
+            } catch {}
+            try {
+              pingPageHook();
+            } catch {}
+            draw();
+          } catch {}
+        }, 900);
+      }
+    } catch {}
 
     chrome.storage.onChanged.addListener((changes, areaName) => {
       if (areaName !== "local") return;

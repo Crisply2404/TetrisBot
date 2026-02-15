@@ -162,6 +162,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     chrome.tabs.create({ url });
   });
 
+  document.getElementById("forceReset")?.addEventListener("click", async () => {
+    const tab2 = await getActiveTetrioTab();
+    if (!tab2) {
+      setText("status", "请先切到 tetr.io 页面");
+      return;
+    }
+    const resp = await sendToTab(tab2.id, { type: "TBP_FORCE_RESET" });
+    if (!resp?.ok) {
+      setText("status", `强制重置失败：${resp?.error || "未知错误"}`);
+      return;
+    }
+    setText("status", "已强制重置：已清缓存并要求页面重新抓取状态。请回到游戏等 1-2 秒；不行就刷新页面。");
+  });
+
   document.getElementById("openScaleLab")?.addEventListener("click", async () => {
     const tab2 = await getActiveTetrioTab();
     if (!tab2) {

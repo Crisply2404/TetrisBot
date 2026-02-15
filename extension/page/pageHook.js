@@ -52,6 +52,10 @@
 
     const originalSet = Map.prototype.set;
     const originalGet = Map.prototype.get;
+    try {
+      if (!window.__tbpMapTapOriginalSet) window.__tbpMapTapOriginalSet = originalSet;
+      if (!window.__tbpMapTapOriginalGet) window.__tbpMapTapOriginalGet = originalGet;
+    } catch {}
 
     function maybeUninstall() {
       if (!window.__tbpGameApi) return;
@@ -733,6 +737,32 @@
     if (!data || data.source !== EXT_SOURCE) return;
     if (data.type === "TBP_PING") {
       window.postMessage({ source: PAGE_SOURCE, type: "TBP_PONG", payload: { ts: Date.now() } }, "*");
+      return;
+    }
+    if (data.type === "TBP_RESET_CAPTURE") {
+      try {
+        // 清掉已捕获 API，让 findGameApi/Map tap 能重新抓一份（常见于“退出对局再进/切模式”后旧 API 还在）。
+        api = null;
+        lastKey = "";
+        lastPostAt = 0;
+        try {
+          window.__tbpGameApi = null;
+          window.__tbpGameApiVia = null;
+          window.__tbpGameApiAt = 0;
+        } catch {}
+
+        // 恢复 Map 原型并重新安装 tap（避免多次 reset 叠加代理）
+        try {
+          const os = safeGetWindowValue("__tbpMapTapOriginalSet");
+          const og = safeGetWindowValue("__tbpMapTapOriginalGet");
+          if (typeof os === "function") Map.prototype.set = os;
+          if (typeof og === "function") Map.prototype.get = og;
+        } catch {}
+        try {
+          window.__tbpMapTapInstalled = false;
+        } catch {}
+        installMapTap();
+      } catch {}
       return;
     }
     if (data.type === "TBP_PAGE_CONFIG") {

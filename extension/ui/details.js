@@ -292,6 +292,17 @@ function renderColdClearInfo(engine, coldClearError, coldClearDebug) {
   const cc = coldClearDebug || null;
   if (cc?.movePiece) parts.push(`cc建议块=${cc.movePiece}`);
   if (cc?.moveSpin && cc.moveSpin !== "none") parts.push(`旋=${cc.moveSpin}`);
+  if (Number.isFinite(cc?.moveX) && Number.isFinite(cc?.moveY)) parts.push(`坐标=x=${cc.moveX} y=${cc.moveY}`);
+  if (cc?.resyncReason) {
+    const r = String(cc.resyncReason);
+    const label =
+      r === "floating_drop_possible"
+        ? "悬空落点（还能往下掉）"
+        : r === "invalid_move"
+          ? "落点不合法（越界/压块/坐标异常）"
+          : r;
+    parts.push(`触发原因=${label}`);
+  }
   if (cc?.pickStrategy) parts.push(`挑选=${cc.pickStrategy}`);
   if (Number.isFinite(cc?.moveIndex) && Number.isFinite(cc?.moveCount)) parts.push(`排行=${cc.moveIndex + 1}/${cc.moveCount}`);
   const q = Array.isArray(cc?.usedQueue) ? cc.usedQueue : Array.isArray(cc?.desiredQueue) ? cc.desiredQueue : null;

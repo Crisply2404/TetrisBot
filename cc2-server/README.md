@@ -5,25 +5,55 @@
 ## 你需要准备什么
 
 1. Node.js（你已经有了就跳过）
-2. Rust 工具链（用于编译 cc2）
+2. Rust 工具链（用于编译 cc2：也就是 `cargo`）
 
 ## 第一次使用（Windows）
 
-1. 先把 cc2 编译出来（只要做一次）：
+### 0) 安装 Rust / Cargo，并把它加进 PATH（最关键）
+
+最省心的方式是装 **rustup**（它会把 `cargo` 一起装好，并默认加到 PATH）。
+
+安装完成后，**重新打开**一个 PowerShell，验证：
 
 ```powershell
-cd "D:\Projects\Agent\TetrisBot\ref\cold-clear-2"
+cargo -V
+rustc -V
+```
+
+如果提示“找不到 cargo”，就手动把下面这个目录加到 PATH：
+
+- `%USERPROFILE%\.cargo\bin`
+
+怎么加（Windows 10/11）：
+
+1. 打开「设置」→ 搜索「环境变量」→ 进入「编辑系统环境变量」
+2. 点右下角「环境变量…」
+3. **推荐改“用户变量”**（只影响你自己，最安全、也最常见）  
+   - 在「用户变量」里找到 `Path` →「编辑」→「新建」→ 粘贴 `%USERPROFILE%\.cargo\bin`
+4. 点确定保存，**重新打开** PowerShell 再试 `cargo -V`
+
+什么时候用“系统变量”？
+- 你希望这台电脑的所有账号都能用 cargo，或者你在公司环境里统一装在系统层面；否则一般不需要。
+
+### 1) 编译 cc2（一般只要做一次）
+
+先确保你有 `cold-clear-2` 源码（你可以放在任意目录；不强制必须是 `ref/`）。
+
+在 `cold-clear-2` 目录里执行：
+
+```powershell
 cargo build --release
 ```
 
 编译成功后会生成：
 
-- `ref/cold-clear-2/target/release/cold-clear-2.exe`
+- `target/release/cold-clear-2.exe`
 
-2. 启动本地服务：
+### 2) 启动本地服务（每次要用 CC2 时都要开着）
+
+在本仓库根目录执行：
 
 ```powershell
-cd "D:\Projects\Agent\TetrisBot"
 node .\cc2-server\server.js
 ```
 
@@ -45,11 +75,10 @@ node .\cc2-server\server.js
 - `POST /suggest`：输入当前局面，返回建议落点
 - `POST /reset`：重启/清空 cc2 的内部状态（一般你不用管）
 
-你可以用环境变量改端口或二进制路径：
+如果你想改端口/或 `cold-clear-2.exe` 不在默认位置，可以用环境变量：
 
 ```powershell
 $env:TBP_CC2_PORT=47123
-$env:TBP_CC2_BIN="D:\\path\\to\\cold-clear-2.exe"
+$env:TBP_CC2_BIN="C:\\path\\to\\cold-clear-2.exe"
 node .\cc2-server\server.js
 ```
-

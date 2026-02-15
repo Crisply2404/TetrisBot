@@ -15,6 +15,7 @@
   - `strict`: 严格选第 1 名（更一致）
   - `preferSpins`: 对战时偏好旋转（更像打旋）
   - `damage`:（实验）按“当前一步粗略伤害估算”重排
+  - `cc2Weights`: 仿 CC2 默认权重在前端重排（仅影响 CC1；不开本地 CC2 时可用）
 - `useHold`: 是否允许引擎使用 hold（默认开，可关）
 - `opacity`: 叠加层透明度
 - `readFullBag`: 是否读取更长块序（默认开；会按 7-bag 变长队列喂给 cold-clear）
