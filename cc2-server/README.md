@@ -82,3 +82,69 @@ $env:TBP_CC2_PORT=47123
 $env:TBP_CC2_BIN="C:\\path\\to\\cold-clear-2.exe"
 node .\cc2-server\server.js
 ```
+
+## 第一次使用（macOS）
+
+### 0) 检查/安装 Rust（cargo）
+
+先检查你有没有装：
+
+```bash
+cargo -V
+rustc -V
+```
+
+如果没有，推荐用 **rustup** 安装（官方方式）：
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+装完后新开一个终端，或执行一次：
+
+```bash
+source "$HOME/.cargo/env"
+```
+
+再确认 `cargo -V` 能跑通。
+
+### 1) 编译 cc2（一般只要做一次）
+
+本仓库默认把源码放在 `ref/cold-clear-2`（如果你放在别处也行）。
+
+```bash
+cd ref/cold-clear-2
+cargo build --release
+```
+
+编译成功后会生成：
+
+- `ref/cold-clear-2/target/release/cold-clear-2`
+
+### 2) 启动本地服务（每次要用 CC2 时都要开着）
+
+在本仓库根目录执行：
+
+```bash
+node cc2-server/server.js
+```
+
+看到类似输出说明启动成功：
+
+```
+[tbp-cc2-local] listening on http://127.0.0.1:47123
+```
+
+验证服务（可选）：
+
+```bash
+curl http://127.0.0.1:47123/health
+```
+
+### 3)（可选）用环境变量改端口/二进制路径
+
+```bash
+TBP_CC2_PORT=47123 \
+TBP_CC2_BIN="/absolute/path/to/cold-clear-2" \
+node cc2-server/server.js
+```

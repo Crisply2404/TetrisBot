@@ -704,6 +704,7 @@
     }
 
     try {
+      const now = Date.now();
       const raw = api.ejectState();
       const holder = api.getHolderData?.();
       const boundsResult = computeStackBounds(holder) || computeBoundsFromPixiStage();
@@ -711,7 +712,12 @@
       const boundsMeta = boundsResult?.meta || null;
       const state = extractStateFromEject(raw);
       if (!state || !state.board || !state.current) {
-        postState({ connected: true, error: "已找到 API，但当前还没有完整状态（可能不在对局中）。" });
+        // 某些模式（例如切模式/双人练习的准备阶段）可能会短时间拿不到完整 state；
+        // 这里做节流，避免每 120ms 刷屏，同时也当作 keepalive 让 content 不误判“状态超时”。
+        if (now - lastPostAt > 900) {
+          lastPostAt = now;
+          postState({ connected: true, error: "已找到 API，但当前还没有完整状态（可能不在对局中）。" });
+        }
         return;
       }
       state.bounds = bounds;
@@ -721,13 +727,22 @@
           ? `${Math.round(bounds.x)}:${Math.round(bounds.y)}:${Math.round(bounds.width)}:${Math.round(bounds.height)}`
           : "nob"
       }`;
-      if (key !== lastKey) {
-        lastKey = key;
-        postState({ connected: true, state });
-      }
+      // 关键：就算局面 key 没变，也要定期发一次 keepalive（否则 content 侧会误判“状态超时”，尤其在
+      // 双人练习/准备阶段/长时间不落块时更明显）。
+      const shouldPost = key !== lastKey || now - lastPostAt > 900;
+      if (!shouldPost) return;
+
+      lastKey = key;
+      lastPostAt = now;
+      postState({ connected: true, state });
     } catch (e) {
       if (config.debug) console.warn("[TBP] tick error:", e);
-      postState({ connected: false, error: String(e?.message || e) });
+      // 节流：避免异常时刷屏，也避免 content 侧心跳被误导
+      const now = Date.now();
+      if (now - lastPostAt > 900) {
+        lastPostAt = now;
+        postState({ connected: false, error: String(e?.message || e) });
+      }
     }
   }
 

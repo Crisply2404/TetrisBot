@@ -1,4 +1,3 @@
-const injectedTabs = new Set();
 const lastCc2BaseUrlByTab = new Map();
 
 function normalizeCc2BaseUrl(raw) {
@@ -56,10 +55,6 @@ function injectMainWorld(tabId, sendResponse) {
     sendResponse({ ok: false, error: "缺少 tabId" });
     return;
   }
-  if (injectedTabs.has(tabId)) {
-    sendResponse({ ok: true, cached: true });
-    return;
-  }
 
   chrome.scripting.executeScript(
     {
@@ -73,13 +68,10 @@ function injectMainWorld(tabId, sendResponse) {
         sendResponse({ ok: false, error: String(err.message || err) });
         return;
       }
-      injectedTabs.add(tabId);
       sendResponse({ ok: true });
     }
   );
 }
-
-chrome.tabs.onRemoved.addListener((tabId) => injectedTabs.delete(tabId));
 
 async function ensureOffscreenDocument() {
   try {
