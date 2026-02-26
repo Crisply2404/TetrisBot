@@ -20,6 +20,28 @@ async function copyText(text) {
   }
 }
 
+async function getActiveTetrioTab() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs?.[0] || null;
+      if (!tab?.id || !tab?.url || !tab.url.startsWith("https://tetr.io/")) return resolve(null);
+      resolve(tab);
+    });
+  });
+}
+
+async function copyCurrentCalibration() {
+  const cur = await window.tbpSettings.getSettings();
+  const payload = {
+    boundsAdjust: cur.boundsAdjust || null,
+    boundsLock: !!cur.boundsLock,
+    boundsLockBaseMode: cur.boundsLockBaseMode || null,
+    boundsLockedRect: cur.boundsLockedRect || null,
+    boundsLockedViewport: cur.boundsLockedViewport || null
+  };
+  return await copyText(JSON.stringify(payload));
+}
+
 function fmtTime(ts) {
   try {
     const n = Number(ts);
@@ -196,6 +218,21 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   status(`当前样本：${samples.length} 条`);
   render();
+
+  document.getElementById("copyCalib")?.addEventListener("click", async () => {
+    const ok = await copyCurrentCalibration();
+    status(ok ? "已复制：校准参数已放到剪贴板。" : "复制失败：你可以手动从 chrome.storage.local 导出 boundsAdjust/boundsLockedRect。");
+  });
+
+  document.getElementById("openScaleLab")?.addEventListener("click", async () => {
+    const tab = await getActiveTetrioTab();
+    if (!tab) {
+      status("请先切到 tetr.io 标签页（并进入对局）。");
+      return;
+    }
+    const url = chrome.runtime.getURL(`ui/scaleLab.html?tabId=${tab.id}`);
+    chrome.tabs.create({ url });
+  });
 
   document.getElementById("export")?.addEventListener("click", async () => {
     const txt = safeJson({ scaleSamples: samples });

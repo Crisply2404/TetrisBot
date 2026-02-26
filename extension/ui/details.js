@@ -8,6 +8,33 @@ function setCcInfo(text) {
   setText("ccInfo", text || "");
 }
 
+async function copyToClipboard(text) {
+  const t = String(text ?? "");
+  if (!t) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(t);
+      return true;
+    }
+  } catch {}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.setAttribute("readonly", "true");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "-9999px";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return !!ok;
+  } catch {
+    return false;
+  }
+}
+
 window.addEventListener("error", (e) => {
   try {
     setMeta(`页面报错：${e?.message || e}`);
@@ -369,6 +396,53 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderViewMode();
   await refresh();
   refreshTimer = window.setInterval(refresh, 350);
+
+  document.getElementById("copyDebug")?.addEventListener("click", async () => {
+    const btn = document.getElementById("copyDebug");
+    const prevText = btn?.textContent || "复制调试包";
+    try {
+      const resp = await sendToTab(tabId, { type: "TBP_GET_DEBUG_BUNDLE" });
+      if (!resp?.ok || !resp?.bundle) {
+        if (btn) {
+          btn.textContent = "复制失败";
+          btn.disabled = true;
+          window.setTimeout(() => {
+            try {
+              btn.textContent = prevText;
+              btn.disabled = false;
+            } catch {}
+          }, 1200);
+        }
+        setMeta(`复制失败：${resp?.error || "读不到调试包（可能内容脚本没响应）"}`);
+        return;
+      }
+      const text = JSON.stringify(resp.bundle, null, 2);
+      const ok = await copyToClipboard(text);
+      if (btn) {
+        btn.textContent = ok ? "已复制" : "复制失败";
+        btn.disabled = true;
+        window.setTimeout(() => {
+          try {
+            btn.textContent = prevText;
+            btn.disabled = false;
+          } catch {}
+        }, 1200);
+      }
+      setMeta(ok ? "已复制调试包到剪贴板（可直接粘贴发给我排查）。" : "复制失败：浏览器拒绝写入剪贴板。");
+    } catch (e) {
+      if (btn) {
+        btn.textContent = "复制失败";
+        btn.disabled = true;
+        window.setTimeout(() => {
+          try {
+            btn.textContent = prevText;
+            btn.disabled = false;
+          } catch {}
+        }, 1200);
+      }
+      setMeta(`复制失败：${e?.message || e}`);
+    }
+  });
 
   document.getElementById("backToLive")?.addEventListener("click", () => {
     viewMode = "live";

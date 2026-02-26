@@ -5,14 +5,15 @@
 
 ## 模块概述
 - **职责:** 基于 GameState 输出 Suggestion（实时）与 Plan（详情页用）
-- **状态:** ✅叠加提示默认优先走 Cold Clear 2（本地服务）；✅连不上会自动回退 Cold Clear 1（插件内 WASM）；⚠️详情页“后续步骤”仍是简化规划（先够用）
+- **状态:** ✅叠加提示默认优先走 Cold Clear 2（本地服务）；✅可切到 MisaMinoBot（本地服务，next5）；✅连不上会自动回退 Cold Clear 1（插件内 WASM）；⚠️详情页“后续步骤”仍是简化规划（先够用）
 - **最后更新:** 2026-02-15
 
 ## 现状（现在代码怎么做的）
 相关代码在：
 - `extension/content/content.js`：从 state 拿实时局面，向后台请求“当前块推荐落点”，并把结果画到叠加层
-- `extension/sw.js`：引擎路由（优先本地 CC2；失败自动回退 CC1）
+- `extension/sw.js`：引擎路由（本地 CC2 / 本地 MisaMino / 失败回退 CC1）
 - `cc2-server/server.js`：本地 CC2 服务（HTTP），内部用 stdin/stdout 驱动 `cold-clear-2`（TBP）
+- `misamino-server/server.js`：本地 MisaMino 服务（HTTP），内部用 stdin/stdout 驱动 `ref/misamino-bot`（action_json）
 - `extension/offscreen/offscreen.js`：CC1 路线：offscreen 文档里跑 Cold Clear v1（WASM/Worker）
 - `extension/engine/coldClearTbpClient.js`：CC1 的 TBP 客户端（rules/start/suggest，拿 suggestion 的落点）
 - `extension/shared/tetris-sim.js`：目前用于**详情页的“后续步骤预览”**（不是实时叠加层的兜底）
@@ -21,6 +22,7 @@
 当前实现分两层：
 - **实时叠加层（当前块建议）**：
   - 默认优先走 **Cold Clear 2（CC2，本地服务）**：更强、更像对战。
+  - 可切到 **MisaMino（本地服务，next5）**：更偏“短预览”玩法（不依赖长队列）。
   - 如果扩展连不上本地 CC2，会自动回退到 **Cold Clear 1（CC1，WASM，离线）**。
   - 如果两边都失败：就会“暂时不显示建议”，并在弹窗/详情页里写出原因，避免你看到两套结果对不上。
 - **详情页（实时，步骤列表）**：

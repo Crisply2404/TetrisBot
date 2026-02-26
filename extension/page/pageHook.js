@@ -11,6 +11,59 @@
     debug: false
   };
 
+  // pageHook 侧调试日志（环形缓冲，便于用户在“卡住/不同步”时导出排查）
+  const LOG_MAX = 240;
+  const logBuf = [];
+  const apiIdMap = new WeakMap();
+  let apiIdSeq = 1;
+  const bannedApis = new WeakMap(); // api -> banUntilTs
+
+  function getApiId(obj) {
+    try {
+      if (!obj || (typeof obj !== "object" && typeof obj !== "function")) return null;
+      const prev = apiIdMap.get(obj);
+      if (prev) return prev;
+      const id = apiIdSeq++;
+      apiIdMap.set(obj, id);
+      return id;
+    } catch {
+      return null;
+    }
+  }
+
+  function isApiBanned(obj) {
+    try {
+      const until = bannedApis.get(obj);
+      if (!until) return false;
+      if (Date.now() >= until) {
+        bannedApis.delete(obj);
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function banApi(obj, ms, reason) {
+    try {
+      if (!obj) return;
+      const until = Date.now() + Math.max(0, Number(ms) || 0);
+      bannedApis.set(obj, until);
+      pushLog("ban_api", { apiId: getApiId(obj), ms: Math.max(0, Number(ms) || 0), reason: String(reason || "") });
+    } catch {}
+  }
+
+  function pushLog(event, data) {
+    try {
+      const entry = { ts: Date.now(), event: String(event || "log") };
+      if (data && typeof data === "object") Object.assign(entry, data);
+      logBuf.push(entry);
+      if (logBuf.length > LOG_MAX) logBuf.splice(0, logBuf.length - LOG_MAX);
+      if (config.debug) console.log("[TBP][page]", entry);
+    } catch {}
+  }
+
   function safeGetWindowValue(key) {
     try {
       return window[key];
@@ -35,9 +88,12 @@
   function tryCaptureApi(value, via) {
     try {
       if (!isApiCandidate(value)) return false;
+      if (isApiBanned(value)) return false;
       if (!window.__tbpGameApi) {
         window.__tbpGameApi = value;
         window.__tbpGameApiVia = String(via || "unknown");
+        window.__tbpGameApiAt = Date.now();
+        pushLog("capture_api", { apiId: getApiId(value), via: window.__tbpGameApiVia });
         if (config.debug) console.log("[TBP] captured game API via", window.__tbpGameApiVia);
       }
       return true;
@@ -57,17 +113,40 @@
       if (!window.__tbpMapTapOriginalGet) window.__tbpMapTapOriginalGet = originalGet;
     } catch {}
 
+    // 默认依然“抓到就卸载”，尽量减少对页面的影响。
+    // 但我们会额外维护一个候选列表：即使已经抓到 api，也会在 map get/set 中继续“旁路观察”新候选，
+    // 当检测到旧 api 卡死时，就能更快切到新 api（避免退出再进后卡在上一局）。
     function maybeUninstall() {
       if (!window.__tbpGameApi) return;
       try {
         Map.prototype.set = originalSet;
         Map.prototype.get = originalGet;
         if (config.debug) console.log("[TBP] map tap uninstalled after capture");
+        pushLog("map_tap_uninstall", { reason: "captured" });
+      } catch {}
+    }
+
+    const candidateList = [];
+    function rememberCandidate(obj, via) {
+      try {
+        if (!isApiCandidate(obj)) return;
+        if (isApiBanned(obj)) return;
+        const id = getApiId(obj);
+        const v = String(via || "unknown");
+        // 去重 + 置顶
+        const idx = candidateList.indexOf(obj);
+        if (idx >= 0) candidateList.splice(idx, 1);
+        candidateList.unshift(obj);
+        if (candidateList.length > 6) candidateList.length = 6;
+        window.__tbpGameApiCandidates = candidateList;
+        pushLog("see_api", { apiId: id, via: v });
       } catch {}
     }
 
     Map.prototype.set = function (key, value) {
       const out = originalSet.call(this, key, value);
+      // 旁路记一下候选（即使已经抓到也记）
+      rememberCandidate(value, "Map.set");
       if (!window.__tbpGameApi) tryCaptureApi(value, "Map.set");
       maybeUninstall();
       return out;
@@ -75,10 +154,13 @@
 
     Map.prototype.get = function (key) {
       const out = originalGet.call(this, key);
+      rememberCandidate(out, "Map.get");
       if (!window.__tbpGameApi) tryCaptureApi(out, "Map.get");
       maybeUninstall();
       return out;
     };
+
+    pushLog("map_tap_install", {});
   }
 
   // 自动对齐（优先）：尽量从 PIXI 渲染层里拿到“棋盘真实位置”，窗口怎么缩放都会跟着变。
@@ -272,12 +354,20 @@
 
   function findGameApi() {
     const captured = safeGetWindowValue("__tbpGameApi");
-    if (isApiCandidate(captured)) return captured;
+    if (isApiCandidate(captured) && !isApiBanned(captured)) return captured;
+
+    // 次优：从 Map tap 旁路记录的候选里挑一个
+    const cand = safeGetWindowValue("__tbpGameApiCandidates");
+    if (Array.isArray(cand)) {
+      for (const v of cand) {
+        if (isApiCandidate(v) && !isApiBanned(v)) return v;
+      }
+    }
 
     const keys = Object.getOwnPropertyNames(window);
     for (const key of keys) {
       const value = safeGetWindowValue(key);
-      if (isApiCandidate(value)) return value;
+      if (isApiCandidate(value) && !isApiBanned(value)) return value;
     }
     return null;
   }
@@ -691,27 +781,144 @@
   let api = null;
   let lastKey = "";
   let lastPostAt = 0;
+  let lastFrame = null;
+  let lastFrameAt = 0;
+  let lastFullStateAt = 0;
+  let noFullStateSince = 0;
+  let lastApiRefreshAt = 0;
+  let lastAutoResetAt = 0;
+
+  function hardResetCapture(reason) {
+    try {
+      const r = String(reason || "unknown");
+      const prev = api;
+      pushLog("reset_capture", {
+        reason: r,
+        prevApiId: getApiId(prev),
+        prevApiVia: String(safeGetWindowValue("__tbpGameApiVia") || "")
+      });
+
+      lastKey = "";
+      lastPostAt = 0;
+      lastFrame = null;
+      lastFrameAt = 0;
+
+      // 清掉已捕获 API，避免 findGameApi() 又拿回旧的
+      try {
+        window.__tbpGameApi = null;
+        window.__tbpGameApiVia = null;
+        window.__tbpGameApiAt = 0;
+      } catch {}
+
+      // 恢复 Map 原型并重新安装 tap（避免多次 reset 叠加代理）
+      try {
+        const os = safeGetWindowValue("__tbpMapTapOriginalSet");
+        const og = safeGetWindowValue("__tbpMapTapOriginalGet");
+        if (typeof os === "function") Map.prototype.set = os;
+        if (typeof og === "function") Map.prototype.get = og;
+      } catch {}
+      try {
+        window.__tbpMapTapInstalled = false;
+      } catch {}
+      installMapTap();
+
+      // 立即尝试再抓一次
+      let nowApi = null;
+      try {
+        nowApi = findGameApi();
+      } catch {}
+
+      api = isApiCandidate(nowApi) ? nowApi : null;
+      if (api && prev && api !== prev) {
+        pushLog("switch_api", { from: getApiId(prev), to: getApiId(api), reason: `reset:${r}` });
+      }
+
+      if (api) {
+        try {
+          window.__tbpGameApi = api;
+          if (!window.__tbpGameApiVia) window.__tbpGameApiVia = `reset:${r}`;
+          window.__tbpGameApiAt = Date.now();
+        } catch {}
+      }
+    } catch {}
+  }
+
+  function maybeRefreshApi(now) {
+    // 不要太频繁：避免每 120ms 扫 window
+    if (!now || now - lastApiRefreshAt < 1800) return;
+    lastApiRefreshAt = now;
+    try {
+      const found = findGameApi();
+      if (isApiCandidate(found) && found !== api && !isApiBanned(found)) {
+        const prev = api;
+        api = found;
+        lastKey = "";
+        lastPostAt = 0;
+        lastFrame = null;
+        lastFrameAt = 0;
+        pushLog("switch_api", { from: getApiId(prev), to: getApiId(api), reason: "periodic" });
+        try {
+          window.__tbpGameApi = api;
+          window.__tbpGameApiVia = `periodic`;
+          window.__tbpGameApiAt = Date.now();
+        } catch {}
+      }
+    } catch {}
+  }
 
   function tick() {
+    const now0 = Date.now();
     if (!api) api = findGameApi();
+    // 即使有 api，也偶尔尝试刷新（主要用于切模式/退出再进）
+    maybeRefreshApi(now0);
     if (!api) {
-      const now = Date.now();
-      if (now - lastPostAt > 1000) {
-        lastPostAt = now;
+      if (now0 - lastPostAt > 1000) {
+        lastPostAt = now0;
         postState({ connected: false, error: "未找到游戏 API（可能还没加载完）。" });
       }
       return;
     }
 
     try {
-      const now = Date.now();
+      const now = now0;
       const raw = api.ejectState();
+
+      // frame 心跳：哪怕暂时提取不到完整 state，也用 raw.frame 来判断“API 是否还在跑”。
+      // 这样可以减少“强制重置后误判不健康 -> ban 掉旧 API”的概率，也能更稳地识别卡死。
+      try {
+        const rf = Number(raw?.frame);
+        if (Number.isFinite(rf)) {
+          if (lastFrame === null || rf !== lastFrame) {
+            lastFrame = rf;
+            lastFrameAt = now;
+          }
+        }
+      } catch {}
+
       const holder = api.getHolderData?.();
       const boundsResult = computeStackBounds(holder) || computeBoundsFromPixiStage();
       const bounds = boundsResult?.bounds || null;
       const boundsMeta = boundsResult?.meta || null;
       const state = extractStateFromEject(raw);
       if (!state || !state.board || !state.current) {
+        // 记录“最近一次有完整状态”的时间，用于判断：
+        // - 按 R 重开/切模式的短暂空窗：别频繁重置
+        // - 但如果空窗持续较久且之前刚在对局中：很可能 API 换了/卡住了，需要自救重抓
+        try {
+          if (!noFullStateSince) noFullStateSince = now;
+          const recentlyInGame = !!lastFullStateAt && now - lastFullStateAt < 12_000;
+          const gap = now - (noFullStateSince || now);
+          if (!document.hidden && recentlyInGame && gap > 2200 && now - lastAutoResetAt > 2500) {
+            lastAutoResetAt = now;
+            pushLog("no_full_state", { apiId: getApiId(api), gap, recentlyInGame });
+            // 不直接 ban：有些模式在“准备阶段”确实会短时间拿不到 board/current。
+            // 这里先做一次 hard reset 捕获（会重装 Map tap + 扫 window），通常足够把新 API 抓回来。
+            hardResetCapture("no_full_state");
+            postState({ connected: false, error: "状态暂不可用（可能刚重开/切模式）。已自动重置捕获，等待恢复…" });
+            return;
+          }
+        } catch {}
+
         // 某些模式（例如切模式/双人练习的准备阶段）可能会短时间拿不到完整 state；
         // 这里做节流，避免每 120ms 刷屏，同时也当作 keepalive 让 content 不误判“状态超时”。
         if (now - lastPostAt > 900) {
@@ -720,6 +927,34 @@
         }
         return;
       }
+
+      // 拿到了完整 state：重置 noFullState 计时
+      try {
+        lastFullStateAt = now;
+        noFullStateSince = 0;
+      } catch {}
+
+      // 关键自救：如果 frame 长时间不变，极大概率是“旧 API 卡住（退出再进/切模式后）”。
+      // 这时不要继续 keepalive 旧状态，否则 content 侧会以为一切正常而一直显示上一局。
+      const frame = Number(state.frame);
+      if (Number.isFinite(frame)) {
+        if (lastFrame === null || frame !== lastFrame) {
+          lastFrame = frame;
+          lastFrameAt = now;
+        } else {
+          const dt = now - (lastFrameAt || now);
+          if (!document.hidden && dt > 2800 && now - lastAutoResetAt > 2000) {
+            lastAutoResetAt = now;
+            pushLog("stale_frame", { apiId: getApiId(api), frame, dt });
+            // 先 ban 旧 api 一段时间，避免 reset 后又被 findGameApi() 捞回去
+            banApi(api, 12000, "stale_frame");
+            hardResetCapture("stale_frame");
+            postState({ connected: false, error: "状态疑似卡住：帧长时间不变，已自动重置捕获。" });
+            return;
+          }
+        }
+      }
+
       state.bounds = bounds;
       state.boundsMeta = boundsMeta;
       const key = `${state.frame}:${state.boardHash}:${state.current}:${state.hold || "-"}:${state.next.join("")}:${
@@ -756,15 +991,16 @@
     }
     if (data.type === "TBP_RESET_CAPTURE") {
       try {
-        // 清掉已捕获 API，让 findGameApi/Map tap 能重新抓一份（常见于“退出对局再进/切模式”后旧 API 还在）。
-        api = null;
+        const reason = String(data?.payload?.reason || "manual");
+        // 手动 reset（来自扩展“强制重置/清缓存”按钮）应该尽量“无感”：
+        // - 你在对局中点它，不应把你直接重置成“未找到 API”
+        // - 真正“卡在上一局”的情况交给 stale 检测自动 hard reset
+        const prevApi = api;
+        const stale = !!prevApi && !!lastFrameAt && Date.now() - lastFrameAt > 3200;
+        pushLog("manual_reset_capture", { reason, prevApiId: getApiId(prevApi), stale });
+
         lastKey = "";
         lastPostAt = 0;
-        try {
-          window.__tbpGameApi = null;
-          window.__tbpGameApiVia = null;
-          window.__tbpGameApiAt = 0;
-        } catch {}
 
         // 恢复 Map 原型并重新安装 tap（避免多次 reset 叠加代理）
         try {
@@ -777,16 +1013,56 @@
           window.__tbpMapTapInstalled = false;
         } catch {}
         installMapTap();
+
+        if (stale && prevApi) {
+          banApi(prevApi, 12000, `manual_stale:${reason}`);
+          hardResetCapture(`manual_stale:${reason}`);
+        } else {
+          // soft reset：保留旧 api（避免“正在对局却变成未找到 API”）
+          api = isApiCandidate(prevApi) ? prevApi : api;
+          try {
+            if (api) {
+              window.__tbpGameApi = api;
+              if (!window.__tbpGameApiVia) window.__tbpGameApiVia = `manual:${reason}`;
+              window.__tbpGameApiAt = Date.now();
+            }
+          } catch {}
+        }
       } catch {}
       return;
     }
     if (data.type === "TBP_PAGE_CONFIG") {
       config.readFullBag = !!data.payload?.readFullBag;
       config.debug = !!data.payload?.debug;
+      pushLog("config", { readFullBag: !!config.readFullBag, debug: !!config.debug });
+    }
+    if (data.type === "TBP_GET_PAGE_LOGS") {
+      const id = Number(data?.payload?.id);
+      const max = Number(data?.payload?.max);
+      const take = Number.isFinite(max) && max > 0 ? Math.min(LOG_MAX, Math.floor(max)) : LOG_MAX;
+      const logs = logBuf.slice(Math.max(0, logBuf.length - take));
+      window.postMessage(
+        {
+          source: PAGE_SOURCE,
+          type: "TBP_PAGE_LOGS",
+          payload: {
+            id: Number.isFinite(id) ? id : null,
+            now: Date.now(),
+            apiId: getApiId(api),
+            apiVia: String(safeGetWindowValue("__tbpGameApiVia") || ""),
+            apiAt: Number(safeGetWindowValue("__tbpGameApiAt") || 0) || null,
+            lastFrame,
+            lastFrameAt: lastFrameAt || null,
+            logs
+          }
+        },
+        "*"
+      );
     }
   });
 
   installMapTap();
   installPixiProbe();
+  pushLog("installed", { href: String(location.href || ""), ts: Date.now() });
   setInterval(tick, 120);
 })();

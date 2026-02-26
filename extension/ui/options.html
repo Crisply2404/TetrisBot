@@ -22,6 +22,7 @@
           <span>引擎优先级</span>
           <select id="engineMode">
             <option value="cc2">优先本地 CC2（推荐）</option>
+            <option value="misamino">优先本地 MisaMino（next5）</option>
             <option value="cc1">只用插件 CC1（兜底）</option>
           </select>
         </label>
@@ -32,6 +33,14 @@
         <label class="row">
           <span>CC2 超时(ms)</span>
           <input id="cc2TimeoutMs" type="number" min="200" max="5000" step="50" />
+        </label>
+        <label class="row">
+          <span>本地 MisaMino 地址</span>
+          <input id="misaminoBaseUrl" type="text" placeholder="http://127.0.0.1:47124" />
+        </label>
+        <label class="row">
+          <span>MisaMino 超时(ms)</span>
+          <input id="misaminoTimeoutMs" type="number" min="200" max="5000" step="50" />
         </label>
         <label class="row">
           <span>快捷键：开/关提示</span>

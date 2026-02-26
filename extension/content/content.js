@@ -29,6 +29,10 @@
   let lastAutoResyncKey = "";
   let lastAutoResyncCount = 0;
 
+  // pageHook 调试日志（从 MAIN 世界拉取）
+  const pageLogRequests = new Map(); // id -> { resolve, timer }
+  let pageLogReqSeq = 0;
+
   // 一致性缓存：同一个局面（board/current/hold/next + 设置）算过一次就复用。
   // 你要求“readFullBag 开/关是两套记忆系统”，所以这里拆成两套缓存（互不影响、互不抢容量）。
   const liveSemanticCacheShort = new Map(); // readFullBag=false
@@ -58,6 +62,24 @@
 
   function postToPage(type, payload) {
     window.postMessage({ source: EXT_SOURCE, type, payload }, "*");
+  }
+
+  function requestPageLogs(timeoutMs = 650) {
+    const id = ++pageLogReqSeq;
+    return new Promise((resolve) => {
+      try {
+        const timer = window.setTimeout(() => {
+          try {
+            pageLogRequests.delete(id);
+          } catch {}
+          resolve(null);
+        }, Math.max(80, Number(timeoutMs) || 650));
+        pageLogRequests.set(id, { resolve, timer });
+        postToPage("TBP_GET_PAGE_LOGS", { id, max: 240, ts: Date.now() });
+      } catch {
+        resolve(null);
+      }
+    });
   }
 
   function markPageHookAlive() {
@@ -772,12 +794,77 @@
         }
       } catch {}
 
-      if (resp?.ok && resp.move) {
+      if (resp?.ok && (resp.move || resp.cells)) {
         lastAppliedLiveRequestId = Math.max(lastAppliedLiveRequestId, requestId);
         lastEngineName = resp.engine || "cold-clear-v1";
         lastColdClearError = null;
         lastColdClearDebug = resp?.debug || null;
-        const cells = tbpMoveToTopCells(resp.move, 40);
+
+        // 关键校验：引擎返回的“建议块”必须和当前局面的可用块一致。
+        // 否则就会出现你截图那种“当前=L，但建议画了个 J”——落点本身可能不压块，所以碰撞校验过得去，
+        // 但语义上一定是不同步/串包/旧回包污染，必须 reset 再重算。
+        try {
+          const got = sim?.normalizePieceId?.(resp?.move?.piece) || null;
+          const cur = sim?.normalizePieceId?.(state?.current) || null;
+          const hold = sim?.normalizePieceId?.(state?.hold) || null;
+          const next1 = Array.isArray(state?.next) ? sim?.normalizePieceId?.(state.next[0]) || null : null;
+          const useHold = !!resp?.useHold;
+          const canHold = state?.canHold !== false && !!settings?.useHold;
+
+          let expected = cur;
+          if (useHold) expected = hold || next1;
+
+          const okExpected = !!expected && !!got && expected === got;
+          const okUseHold = !useHold || !!canHold;
+
+          if (got && (!okExpected || !okUseHold)) {
+            try {
+              if (semanticKey && semanticKey !== lastAutoResyncKey) {
+                lastAutoResyncKey = semanticKey;
+                lastAutoResyncCount = 0;
+              }
+            } catch {}
+            lastAutoResyncCount = Math.max(0, Number(lastAutoResyncCount) || 0) + 1;
+            const willAutoReset = lastAutoResyncCount <= 1;
+
+            const label = lastEngineName || "engine";
+            const why = !okUseHold ? "引擎用了 Hold，但当前状态显示本手不能 Hold" : "引擎返回的块不在当前可用集合里";
+            lastColdClearError = `${label} 不同步：返回 ${got}（useHold=${useHold ? "true" : "false"}），但按当前状态应为 ${expected || "?"}。原因=${why}${
+              willAutoReset ? "（已自动 reset，等待重算）" : "（已自动 reset 过一次仍异常：请点“强制重置（清缓存）”或刷新）"
+            }`;
+            lastColdClearDebug = {
+              ...(resp?.debug || null),
+              resyncReason: "piece_mismatch",
+              expectedPiece: expected || null,
+              gotPiece: got,
+              useHold,
+              canHold,
+              current: cur,
+              hold,
+              next1
+            };
+
+            try {
+              const mem = getCcMem(settings);
+              mem.state = null;
+              mem.move = null;
+              mem.cells = null;
+            } catch {}
+            lastSuggestion = null;
+            lastEngineDebug = settings?.debug ? { engine: lastEngineName, ...lastColdClearDebug, sync } : { preset: settings?.modePreset || "40l", reason: why, sync };
+            lastLiveKey = semanticKey || "";
+            try {
+              const cache = getLiveSemanticCache(settings);
+              if (semanticKey && cache) cache.delete(semanticKey);
+            } catch {}
+
+            if (willAutoReset) await requestColdClearReset("piece_mismatch");
+            draw();
+            return;
+          }
+        } catch {}
+
+        const cells = Array.isArray(resp?.cells) ? resp.cells : tbpMoveToTopCells(resp.move, 40);
         const cellCheck = validateTopCellsAgainstBoard01(cells, state?.board);
         if (!cells?.length || !cellCheck.ok) {
           // 这是“根因定位”的关键证据：如果落点压到已有块/越界，说明：
@@ -1336,6 +1423,7 @@
     // - 一旦棋盘变了（说明块落地/行清/吃垃圾），就进入新一手，hold 又恢复可用
     // - 棋盘没变时，只在“看起来确实发生了 hold 交换”的情况下，才认定这手已经 hold 过
     //   （避免开局/倒计时/生成新块时 current 变化，被误判成“已经 hold 过”，导致可Hold=否）
+    let didHoldThisUpdate = false;
     try {
       const prev = lastState || null;
       const prevHash = prev?.boardHash || null;
@@ -1365,11 +1453,13 @@
         }
 
         if (didHold) holdUsedThisTurn = true;
+        didHoldThisUpdate = didHold;
       }
 
       // 写回到 state：引擎会用它避免“建议你连续 hold 两次”这种不合法操作
       nextState.canHold = !!settings?.useHold && !holdUsedThisTurn;
     } catch {
+      didHoldThisUpdate = false;
       nextState.canHold = !!settings?.useHold;
     }
 
@@ -1377,6 +1467,66 @@
     // 这样 Zen “从上次没打完继续”或“开局快速切模式”时，不会短暂显示上一局的建议。
     try {
       const semNow = semanticKeyForLive(nextState, settings);
+
+      // Hold 前后一致性（你不爽的那个点）：如果上一手的建议是“先 Hold 再放某块”，
+      // 玩家按下 Hold 以后，我们直接复用上一手的落点（把 useHold 置为 false），避免“同一块落点跳变”。
+      // 这比“按 next 是否一致”更鲁棒：即使 tetr.io 在某些帧边界导致 next 队列瞬时抖动，也不会让落点变来变去。
+      try {
+        if (didHoldThisUpdate && semNow) {
+          const mem = getCcMem(settings);
+          const prevMemState = mem?.state || null;
+          const prevMove = mem?.move || null;
+          const prevCells = Array.isArray(mem?.cells) ? mem.cells : null;
+
+          const prevSeen = lastState || null;
+          const prevHash = prevSeen?.boardHash || null;
+          const nowHash = nextState?.boardHash || null;
+          const memHash = prevMemState?.boardHash || null;
+
+          const prevCurrent = sim?.normalizePieceId?.(prevMemState?.current) || null;
+          const prevSeenCurrent = sim?.normalizePieceId?.(prevSeen?.current) || null;
+          const prevHold = sim?.normalizePieceId?.(prevMemState?.hold) || null;
+          const prevSeenHold = sim?.normalizePieceId?.(prevSeen?.hold) || null;
+          const movePiece = sim?.normalizePieceId?.(prevMove?.piece) || null;
+          const nowCurrent = sim?.normalizePieceId?.(nextState?.current) || null;
+          const nowHold = sim?.normalizePieceId?.(nextState?.hold) || null;
+
+          const usedHold = !!movePiece && !!prevCurrent && movePiece !== prevCurrent;
+          const boardOk = !!prevHash && !!nowHash && prevHash === nowHash && (!memHash || memHash === nowHash);
+          const memMatchesPrevSeen =
+            !!prevSeenCurrent && !!prevCurrent && prevSeenCurrent === prevCurrent && (prevSeenHold || null) === (prevHold || null);
+          const stateOk =
+            usedHold && boardOk && memMatchesPrevSeen && !!prevCells?.length && nowCurrent === movePiece && nowHold === prevCurrent;
+
+          if (stateOk) {
+            const carried = { useHold: false, rotation: 0, x: 0, y: 0, cells: prevCells };
+            lastSuggestion = carried;
+            lastColdClearError = null;
+            try {
+              lastColdClearDebug = lastColdClearDebug
+                ? { ...lastColdClearDebug, holdCarryApplied: true }
+                : { holdCarryApplied: true };
+            } catch {}
+            lastEngineDebug = settings?.debug ? { fromHoldCarry: true } : null;
+            lastLiveKey = semNow;
+            // 同时写入一致性缓存，避免后续渲染/详情页因为异步节奏又触发一次重算
+            try {
+              const cache = getLiveSemanticCache(settings);
+              if (cache) {
+                cache.set(semNow, {
+                  at: Date.now(),
+                  suggestion: carried,
+                  engine: lastEngineName || "cold-clear-v1",
+                  coldClearError: null,
+                  coldClearDebug: lastColdClearDebug ? { ...lastColdClearDebug, holdCarryApplied: true } : { holdCarryApplied: true }
+                });
+                trimLiveCacheIfNeeded(cache);
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+
       if (semNow && semNow !== lastLiveKey) {
         lastSuggestion = null;
         lastColdClearError = null;
@@ -1397,6 +1547,22 @@
       if (!data || data.source !== PAGE_SOURCE) return;
       if (data.type === "TBP_PONG") {
         markPageHookAlive();
+        return;
+      }
+      if (data.type === "TBP_PAGE_LOGS") {
+        const id = Number(data?.payload?.id);
+        if (!Number.isFinite(id)) return;
+        const req = pageLogRequests.get(id);
+        if (!req) return;
+        try {
+          window.clearTimeout(req.timer);
+        } catch {}
+        try {
+          pageLogRequests.delete(id);
+        } catch {}
+        try {
+          req.resolve(data.payload || null);
+        } catch {}
         return;
       }
       if (data.type === "TBP_STATE") handlePageMessage(data.payload);
@@ -1448,6 +1614,68 @@
           canHold: lastState?.canHold !== false
         });
         return;
+      }
+      if (msg.type === "TBP_GET_DEBUG_BUNDLE") {
+        (async () => {
+          const pageLogs = await requestPageLogs(650);
+          const align = computeAlignInfo(lastState, settings, overlay, calibrationActive);
+          const manifest = chrome.runtime.getManifest ? chrome.runtime.getManifest() : null;
+
+          // 尽量别把整份 settings（尤其是大量样本）全塞进去：只保留排错关键字段
+          const settingsBrief = settings
+            ? {
+                enabled: !!settings.enabled,
+                useHold: !!settings.useHold,
+                readFullBag: !!settings.readFullBag,
+                modePreset: settings.modePreset || "40l",
+                alignMode: settings.alignMode || "pixi",
+                engineMode: settings.engineMode || "cc2",
+                cc2BaseUrl: settings.cc2BaseUrl || null,
+                cc2TimeoutMs: Number.isFinite(Number(settings.cc2TimeoutMs)) ? Number(settings.cc2TimeoutMs) : null,
+                misaminoBaseUrl: settings.misaminoBaseUrl || null,
+                misaminoTimeoutMs: Number.isFinite(Number(settings.misaminoTimeoutMs)) ? Number(settings.misaminoTimeoutMs) : null,
+                boundsLock: !!settings.boundsLock,
+                boundsLockBaseMode: settings.boundsLockBaseMode || null,
+                boundsLockedRect: settings.boundsLockedRect || null,
+                boundsAdjust: settings.boundsAdjust || null,
+                boundsLockedViewport: settings.boundsLockedViewport || null
+              }
+            : null;
+
+          return {
+            ok: true,
+            bundle: {
+              ts: Date.now(),
+              version: manifest?.version || null,
+              page: {
+                href: String(location.href || ""),
+                hookReady: !!pageHookReady,
+                connected: !!pageConnected,
+                lastPageError: lastPageError || null,
+                lastPageMessageAt: Number(lastPageMessageAt || 0) || null
+              },
+              settings: settingsBrief,
+              state: lastState || null,
+              overlay: {
+                boundsUsed: lastOverlayBounds || null,
+                boundsMode: lastOverlayBoundsMode || null,
+                baseBounds: lastBaseBounds || null,
+                alignMode: align.mode,
+                alignSource: align.label
+              },
+              engine: {
+                name: lastEngineName || null,
+                coldClearError: lastColdClearError || null,
+                coldClearDebug: lastColdClearDebug || null
+              },
+              suggestion: lastSuggestion || null,
+              pageLogs: pageLogs || null
+            }
+          };
+        })()
+          .then((resp) => sendResponse(resp))
+          .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+        return true;
       }
       if (msg.type === "TBP_START_CALIBRATION") {
         (async () => {
@@ -1622,7 +1850,22 @@
       if (msg.type === "TBP_GET_DETAILS_DATA") {
         (async () => {
           if (!lastState) {
-            sendResponse({ ok: false, error: "当前没有拿到游戏状态（可能还没进游戏，或读不到状态）。" });
+            const align0 = computeAlignInfo(lastState, settings, overlay, calibrationActive);
+            sendResponse({
+              ok: true,
+              connected: pageConnected,
+              error: lastPageError || "状态还没准备好（可能刚重开/切模式/还没进对局）。",
+              key: "",
+              state: null,
+              suggestion: null,
+              detailsSuggestion: null,
+              engine: lastEngineName || "sim",
+              coldClearError: null,
+              coldClearDebug: null,
+              modePreset: settings?.modePreset || "40l",
+              alignMode: align0.mode,
+              alignSource: align0.label
+            });
             return;
           }
           const semNow = semanticKeyForLive(lastState, settings);

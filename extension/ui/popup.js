@@ -48,18 +48,7 @@ function setHidden(id, hidden) {
 function applyCalibToolsVisibility(isCalibMode) {
   // “校准/采样工具”只在校准/采样模式时显示（减少弹窗干扰）
   setHidden("calibrate", !isCalibMode);
-  setHidden("copyCalib", !isCalibMode);
-  setHidden("openScaleLab", !isCalibMode);
   setHidden("openSamples", !isCalibMode);
-}
-
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(String(text));
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -107,9 +96,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       if (resp.engine) parts.push(`引擎=${resp.engine}`);
       try {
-        const wantCc2 = String(s?.engineMode || "cc2") === "cc2";
-        if (wantCc2 && resp.engine && resp.engine !== "cold-clear-2") {
-          parts.push("提示：当前设置是“优先本地 CC2”，但没连上，所以用了 CC1 兜底。要用 CC2 请先启动 cc2-server。");
+        const want = String(s?.engineMode || "cc2");
+        // 没拿到 state 的时候，引擎其实还没跑起来；这时不要误导用户“本地服务没连上”。
+        if (resp?.hasState) {
+          if (want === "cc2" && resp.engine && resp.engine !== "cold-clear-2") {
+            parts.push("提示：当前设置是“优先本地 CC2”，但没连上，所以用了 CC1 兜底。要用 CC2 请先启动 cc2-server。");
+          }
+          if (want === "misamino" && resp.engine && resp.engine !== "misamino") {
+            parts.push("提示：当前设置是“优先本地 MisaMino”，但没连上，所以用了 CC1 兜底。要用 MisaMino 请先启动 misamino-server。");
+          }
         }
       } catch {}
       if (resp.alignSource) parts.push(`对齐=${resp.alignSource}`);
@@ -176,16 +171,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     setText("status", "已强制重置：已清缓存并要求页面重新抓取状态。请回到游戏等 1-2 秒；不行就刷新页面。");
   });
 
-  document.getElementById("openScaleLab")?.addEventListener("click", async () => {
-    const tab2 = await getActiveTetrioTab();
-    if (!tab2) {
-      setText("status", "请先切到 tetr.io 页面");
-      return;
-    }
-    const url = chrome.runtime.getURL(`ui/scaleLab.html?tabId=${tab2.id}`);
-    chrome.tabs.create({ url });
-  });
-
   document.getElementById("openSamples")?.addEventListener("click", async () => {
     const url = chrome.runtime.getURL("ui/samples.html");
     chrome.tabs.create({ url });
@@ -203,24 +188,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
     setText("status", "已开启校准：请回到游戏页面拖动绿色框对齐棋盘，然后点“保存校准”。");
-  });
-
-  document.getElementById("copyCalib")?.addEventListener("click", async () => {
-    const cur = await window.tbpSettings.getSettings();
-    const payload = {
-      boundsAdjust: cur.boundsAdjust || null,
-      boundsLock: !!cur.boundsLock,
-      boundsLockBaseMode: cur.boundsLockBaseMode || null,
-      boundsLockedRect: cur.boundsLockedRect || null,
-      boundsLockedViewport: cur.boundsLockedViewport || null
-    };
-    const ok = await copyText(JSON.stringify(payload));
-    setText(
-      "status",
-      ok
-        ? "已复制校准参数到剪贴板：把它发给我，我就能帮你写进默认值里。"
-        : "复制失败：你可以去更多设置里打开调试，或者手动把 storage 里的 boundsAdjust/boundsLockedRect 发给我。"
-    );
   });
 
   document.getElementById("openOptions")?.addEventListener("click", (e) => {

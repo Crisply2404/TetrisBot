@@ -1,11 +1,20 @@
 const lastCc2BaseUrlByTab = new Map();
+const lastMisaminoBaseUrlByTab = new Map();
 
 function normalizeCc2BaseUrl(raw) {
   const s = String(raw || "").trim().replace(/\/+$/, "");
   return s || "http://127.0.0.1:47123";
 }
 
-async function fetchJsonWithTimeout(url, { method = "GET", headers = null, body = null, timeoutMs = 1000 } = {}) {
+function normalizeMisaminoBaseUrl(raw) {
+  const s = String(raw || "").trim().replace(/\/+$/, "");
+  return s || "http://127.0.0.1:47124";
+}
+
+async function fetchJsonWithTimeout(
+  url,
+  { method = "GET", headers = null, body = null, timeoutMs = 1000, label = "服务" } = {}
+) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), Math.max(50, Number(timeoutMs) || 1000));
   try {
@@ -19,11 +28,11 @@ async function fetchJsonWithTimeout(url, { method = "GET", headers = null, body 
     try {
       return JSON.parse(text);
     } catch {
-      return { ok: false, error: `cc2 返回不是 JSON（HTTP ${resp.status}）` };
+      return { ok: false, error: `${label} 返回不是 JSON（HTTP ${resp.status}）` };
     }
   } catch (e) {
     const msg = String(e?.message || e || "fetch failed");
-    return { ok: false, error: msg.includes("aborted") ? "cc2 请求超时" : `cc2 连接失败：${msg}` };
+    return { ok: false, error: msg.includes("aborted") ? `${label} 请求超时` : `${label} 连接失败：${msg}` };
   } finally {
     clearTimeout(t);
   }
@@ -39,7 +48,8 @@ async function requestColdClear2Suggestion(tabId, payload) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload || {}),
-    timeoutMs
+    timeoutMs,
+    label: "cc2"
   });
 }
 
@@ -47,7 +57,40 @@ async function requestColdClear2Reset(tabId) {
   const baseUrl = normalizeCc2BaseUrl(lastCc2BaseUrlByTab.get(tabId));
   const url = `${baseUrl}/reset`;
   // reset 失败不算致命：兜底 cc1 还能继续跑
-  return await fetchJsonWithTimeout(url, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", timeoutMs: 800 });
+  return await fetchJsonWithTimeout(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+    timeoutMs: 800,
+    label: "cc2"
+  });
+}
+
+async function requestMisaminoSuggestion(tabId, payload) {
+  const settings = payload?.settings || null;
+  const baseUrl = normalizeMisaminoBaseUrl(settings?.misaminoBaseUrl);
+  lastMisaminoBaseUrlByTab.set(tabId, baseUrl);
+  const timeoutMs = Number(settings?.misaminoTimeoutMs) || 800;
+  const url = `${baseUrl}/suggest`;
+  return await fetchJsonWithTimeout(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload || {}),
+    timeoutMs,
+    label: "misamino"
+  });
+}
+
+async function requestMisaminoReset(tabId) {
+  const baseUrl = normalizeMisaminoBaseUrl(lastMisaminoBaseUrlByTab.get(tabId));
+  const url = `${baseUrl}/reset`;
+  return await fetchJsonWithTimeout(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+    timeoutMs: 800,
+    label: "misamino"
+  });
 }
 
 function injectMainWorld(tabId, sendResponse) {
@@ -172,6 +215,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const payload = msg.payload || null;
 
       const mode = String(payload?.settings?.engineMode || "cc2");
+      if (mode === "cc1") {
+        const resp = await requestColdClearSuggestion(tabId, payload);
+        return resp || { ok: false, error: "cold-clear 无响应" };
+      }
+
+      if (mode === "misamino") {
+        const misa = await requestMisaminoSuggestion(tabId, payload);
+        if (misa?.ok && (misa.cells || misa.move)) return misa;
+
+        // misamino 不可用 → 回退 cc1
+        const cc1 = await requestColdClearSuggestion(tabId, payload);
+        if (cc1 && typeof cc1 === "object") {
+          try {
+            cc1.debug = { ...(cc1.debug || null), fallbackFrom: "misamino", misaminoError: misa?.error || "misamino 不可用" };
+          } catch {}
+          return cc1;
+        }
+        return misa || { ok: false, error: "misamino/cc1 都无响应" };
+      }
+
+      // 默认：cc2（不可用则回退 cc1）
       if (mode !== "cc1") {
         const cc2 = await requestColdClear2Suggestion(tabId, payload);
         if (cc2?.ok && cc2.move) return cc2;
@@ -186,9 +250,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         return cc2 || { ok: false, error: "cc2/cc1 都无响应" };
       }
-
-      const resp = await requestColdClearSuggestion(tabId, payload);
-      return resp || { ok: false, error: "cold-clear 无响应" };
     })()
       .then((resp) => sendResponse(resp))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
@@ -199,10 +260,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const tabId = sender?.tab?.id;
       if (!tabId) return { ok: false, error: "缺少 tabId" };
-      // 两边都 reset 一下（cc2 失败不致命）
+      // 都 reset 一下（失败不致命）
       const cc2 = await requestColdClear2Reset(tabId);
+      const misa = await requestMisaminoReset(tabId);
       const cc1 = await requestColdClearReset(tabId);
-      return { ok: !!(cc1?.ok || cc2?.ok), cc2: cc2 || null, cc1: cc1 || null };
+      return { ok: !!(cc1?.ok || cc2?.ok || misa?.ok), cc2: cc2 || null, misamino: misa || null, cc1: cc1 || null };
     })()
       .then((resp) => sendResponse(resp))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));

@@ -1,5 +1,0 @@
-{
-  "name": "TetrisMind",
-  "description": "An AI-powered TETR.IO replay analysis tool offering intent-driven evaluation, decision forests, and debate capability.",
-  "requestFramePermissions": []
-}

@@ -3,12 +3,17 @@
     enabled: true,
     // 引擎优先级：
     // - cc2：优先用“本地 Cold Clear 2 服务”（更强）；连不上就自动回退到 cc1
+    // - misamino：优先用“本地 MisaMinoBot 服务”（只看 next5，更偏“人类直觉”）；连不上就自动回退到 cc1
     // - cc1：强制只用扩展内置 Cold Clear 1（WASM，离线）
     engineMode: "cc2",
     // 本地 cc2 服务地址（默认就是我们仓库里的 cc2-server/server.js）
     cc2BaseUrl: "http://127.0.0.1:47123",
     // cc2 这次请求最多等多久（毫秒）。越大越稳但越可能“慢半拍”。
     cc2TimeoutMs: 900,
+    // 本地 misamino 服务地址（默认就是我们仓库里的 misamino-server/server.js）
+    misaminoBaseUrl: "http://127.0.0.1:47124",
+    // misamino 这次请求最多等多久（毫秒）。
+    misaminoTimeoutMs: 800,
     modePreset: "40l",
     allowedSpins: "tspins",
     // Cold Clear 返回多个候选落点时，前端如何挑选“最终要画出来的那个”

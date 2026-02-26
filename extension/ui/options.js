@@ -45,6 +45,19 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   bind("cc2TimeoutMs", s.cc2TimeoutMs, (v) => window.tbpSettings.setSettings({ cc2TimeoutMs: v }));
 
+  const misaminoBaseUrlEl = document.getElementById("misaminoBaseUrl");
+  if (misaminoBaseUrlEl) {
+    misaminoBaseUrlEl.value = String(s.misaminoBaseUrl || "");
+    misaminoBaseUrlEl.addEventListener("change", () => {
+      const raw = String(misaminoBaseUrlEl.value || "").trim();
+      const url = raw.replace(/\/+$/, "");
+      misaminoBaseUrlEl.value = url;
+      window.tbpSettings.setSettings({ misaminoBaseUrl: url });
+    });
+  }
+
+  bind("misaminoTimeoutMs", s.misaminoTimeoutMs, (v) => window.tbpSettings.setSettings({ misaminoTimeoutMs: v }));
+
   const toggleKeyEl = document.getElementById("toggleKey");
   if (toggleKeyEl) {
     toggleKeyEl.value = String(s.toggleKey || "");
